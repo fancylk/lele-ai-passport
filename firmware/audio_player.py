@@ -1,5 +1,6 @@
 """
-ES8311 Hardware Sound Effect & Audio Tone Player for MicroPython.
+ES8311 Hardware Sound Effect & Chime Player for Lele AI Passport.
+Provides cheerful, distinct melodies and sound effects for each interactive step.
 """
 
 import time
@@ -44,49 +45,63 @@ class AudioPlayer:
             self._w(0x07, 0x00)
             self._w(0x08, 0xFF)
 
-            # Power Up
+            # Power Up Output DAC & Amp
             self._w(0x0D, 0x01)
             self._w(0x0E, 0x02)
             self._w(0x0F, 0x44)
             self._w(0x12, 0x00)
             self._w(0x13, 0x10)
 
-            # Output Volume
+            # Output Volume (Loud & Crisp)
             self._w(0x31, 0x00) # Unmute
-            self._w(0x32, 0x08) # Volume (-4dB)
+            self._w(0x32, 0x00) # Maximum output gain (0dB)
             self.ready = True
-            print("[+] ES8311 Audio Player Initialized!")
+            print("[+] ES8311 Sound Engine Initialized Successfully!")
         except Exception as e:
             print("[!] ES8311 Audio init failed:", e)
 
-    def play_beep(self, freq_code=0x88, duration_ms=120):
-        """Play hardware tone."""
+    def play_beep(self, freq_code=0x88, duration_ms=100):
+        """Play hardware tone code."""
         if not self.ready:
             return
         self._w(0x37, freq_code) # Beep ON
         time.sleep_ms(duration_ms)
         self._w(0x37, 0x00)      # Beep OFF
 
+    def play_click(self):
+        """Subtle tactile key click."""
+        self.play_beep(0x82, 35)
+
     def play_record_start(self):
-        """Chime on voice record start: 叮-咚 (Ding-Dong)."""
-        self.play_beep(0x88, 100)
-        time.sleep_ms(40)
-        self.play_beep(0x84, 150)
+        """Chime when starting to speak: 叮-咚 (Ding-Dong)."""
+        self.play_beep(0x84, 90)
+        time.sleep_ms(30)
+        self.play_beep(0x88, 140)
+
+    def play_record_stop(self):
+        """Soft confirmation when releasing the button."""
+        self.play_beep(0x86, 60)
+
+    def play_proposal_ready(self):
+        """Lively 'Ta-da!' chime when AGY returns the proposal: 咪-索-哆!"""
+        self.play_beep(0x82, 70)
+        time.sleep_ms(25)
+        self.play_beep(0x85, 70)
+        time.sleep_ms(25)
+        self.play_beep(0x89, 150)
 
     def play_send_success(self):
-        """Triumphant Chime on sending command: 哆-咪-索!"""
-        self.play_beep(0x82, 80)
-        time.sleep_ms(30)
-        self.play_beep(0x86, 80)
-        time.sleep_ms(30)
-        self.play_beep(0x8A, 180)
+        """Celebratory Victory Fanfare on task deployment: 哆-咪-索-高哆!"""
+        self.play_beep(0x81, 80)
+        time.sleep_ms(20)
+        self.play_beep(0x83, 80)
+        time.sleep_ms(20)
+        self.play_beep(0x86, 90)
+        time.sleep_ms(20)
+        self.play_beep(0x8A, 220)
 
     def play_cancel(self):
-        """Cancel tone."""
-        self.play_beep(0x84, 80)
-        time.sleep_ms(30)
-        self.play_beep(0x81, 120)
-
-    def play_click(self):
-        """Subtle soft click."""
-        self.play_beep(0x82, 40)
+        """Soft descending cancel tone."""
+        self.play_beep(0x87, 80)
+        time.sleep_ms(25)
+        self.play_beep(0x82, 120)

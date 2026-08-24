@@ -1,6 +1,6 @@
 """
-Lele AI Tour Guide 3-Step Interactive Confirmation Application (Fixed State Machine).
-1. Hold UP: Speak intent -> 2. Release UP: AGY text proposal -> 3. Press OK: Confirm & deploy!
+Lele AI Tour Guide 3-Step Interactive Confirmation Application with Rich Sound Effects.
+1. Hold UP: Ding-dong chime & speak -> 2. Release UP: Ta-da! proposal with MiMo voice -> 3. Press OK: Victory fanfare & deploy!
 """
 
 import sys
@@ -12,6 +12,8 @@ from config import *
 from st7789_direct import ST7789Direct
 from lele_ui import LeleUI, STATE_GUIDE, STATE_LISTENING, STATE_PROPOSAL, STATE_DEPLOYING, STATE_SUCCESS
 from wifi_manager import WiFiManager
+from audio_player import AudioPlayer
+from battery import BatteryGauge
 from spots_data import SPOTS
 
 # 1. Initialize Display
@@ -31,14 +33,25 @@ ui = LeleUI(display=display, width=SCREEN_WIDTH, height=SCREEN_HEIGHT)
 curr_spot_idx = 0
 ui.update_guide(SPOTS[curr_spot_idx])
 
-# 2. ADC Keypad on GPIO 0
+# 2. Shared I2C for ES8311 & CW2017
+shared_i2c = None
+try:
+    shared_i2c = I2C(0, sda=Pin(PIN_I2C_SDA), scl=Pin(PIN_I2C_SCL), freq=100000)
+except Exception:
+    pass
+
+audio = AudioPlayer(i2c=shared_i2c, addr=0x18)
+battery = BatteryGauge(i2c=shared_i2c, addr=0x63)
+ui.battery_pct, _ = battery.get_info()
+
+# 3. ADC Keypad on GPIO 0
 adc = ADC(Pin(PIN_BTN_ADC))
 try:
     adc.atten(ADC.ATTN_11DB)
 except Exception:
     pass
 
-# 3. WiFi Manager
+# 4. WiFi Manager
 wifi = WiFiManager()
 try:
     wifi.connect(timeout=4)
@@ -66,7 +79,7 @@ def send_packet(d):
     if wifi.is_connected:
         wifi.send_udp(pkt)
 
-# Voice Scenarios (Step 1 -> Step 2)
+# Voice Scenarios
 SCENARIOS = [
     {
         "voice": "我想给开封加一个包公断案的故事！",
@@ -105,15 +118,17 @@ def handle_incoming_json(line_str):
 
     msg_type = pkt.get("type")
     if msg_type == "proposal":
-        ui.show_proposal(pkt.get("title", ""), pkt.get("desc", ""), pkt.get("quiz", ""))
+        audio.play_proposal_ready()
+        ui.show_proposal(pkt.get("user_text", ""), pkt.get("title", ""), pkt.get("desc", ""), pkt.get("quiz", ""))
     elif msg_type == "task_done":
+        audio.play_send_success()
         ui.show_success()
-        time.sleep(2.5)
+        time.sleep(2.8)
         ui.show_guide()
 
 def main():
     global curr_spot_idx, scen_idx
-    print("[+] Lele 3-Step Interactive Tour Guide App Running.")
+    print("[+] Lele Interactive Tour Guide App Running.")
     poll_obj = select.poll()
     poll_obj.register(sys.stdin, select.POLLIN)
     line_buf = []
@@ -143,35 +158,39 @@ def main():
         btn = read_btn()
 
         if ui.state == STATE_GUIDE:
-            # 1. Start speech when UP pressed
+            # 1. Hold UP -> Ding-dong chime & speech screen
             if btn == "UP":
-                curr_scen = SCENARIOS[scen_idx]
-                ui.show_listening(curr_scen["voice"])
+                audio.play_record_start()
+                ui.show_listening()
             elif btn and btn != last_btn:
                 if now - last_btn_time > 0.2:
                     last_btn_time = now
                     if btn == "DOWN":
-                        # Instant local spot flip
+                        audio.play_click()
                         curr_spot_idx = (curr_spot_idx + 1) % len(SPOTS)
                         ui.update_guide(SPOTS[curr_spot_idx])
                     elif btn == "OK":
+                        audio.play_click()
                         send_packet({"type": "ping"})
 
         elif ui.state == STATE_LISTENING:
-            # 2. Transition to Step 2 when UP released!
+            # 2. Release UP -> Ta-da chime & proposal screen!
             if btn != "UP":
+                audio.play_record_stop()
+                time.sleep(0.1)
+                audio.play_proposal_ready()
                 curr_scen = SCENARIOS[scen_idx]
                 scen_idx = (scen_idx + 1) % len(SCENARIOS)
-                ui.show_proposal(curr_scen["title"], curr_scen["desc"], curr_scen["quiz"])
+                ui.show_proposal(curr_scen["voice"], curr_scen["title"], curr_scen["desc"], curr_scen["quiz"])
                 last_btn_time = now
 
         elif ui.state == STATE_PROPOSAL:
-            # 3. Confirm or Cancel
+            # 3. Confirm (OK) or Cancel (DOWN)
             if btn and btn != last_btn:
                 if now - last_btn_time > 0.3:
                     last_btn_time = now
                     if btn == "OK":
-                        # Confirmed! -> Deploy
+                        # Confirmed! -> Deploy with Victory Fanfare
                         ui.show_deploying()
                         send_packet({
                             "type": "confirm_task",
@@ -180,11 +199,12 @@ def main():
                             "quiz": ui.prop_quiz
                         })
                         time.sleep(1.8)
+                        audio.play_send_success()
                         ui.show_success()
-                        time.sleep(2.5)
+                        time.sleep(2.8)
                         ui.show_guide()
                     elif btn == "DOWN":
-                        # Cancelled! -> Back to Guide
+                        audio.play_cancel()
                         ui.show_guide()
 
         last_btn = btn
