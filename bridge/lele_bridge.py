@@ -31,6 +31,12 @@ logger = logging.getLogger("LeleBridge")
 UDP_PORT = 8888
 BROADCAST_IP = os.environ.get("LELE_BROADCAST_IP", "192.168.31.255")
 
+
+def await_free(fn, *args):
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(fn, *args).result(timeout=120)
+
 class LeleBridgeService:
     def __init__(self, port: int = UDP_PORT, broadcast_ip: str = BROADCAST_IP):
         self.port = port
@@ -71,10 +77,20 @@ class LeleBridgeService:
             f.write(wav_data)
         logger.info(f"[+] Saved recorded WAV to {rec_path}")
 
-        # 1. Call MiMo ASR
-        user_text = self.mimo.recognize_speech(wav_data)
+        # 1. ASR: 本地 faster-whisper 优先（免费），失败再试 MiMo ASR
+        user_text = ""
+        try:
+            from local_asr import transcribe_wav
+            t0 = time.time()
+            user_text = await_free(transcribe_wav, wav_data)
+            if user_text:
+                logger.info(f"[+] Local whisper ASR ({time.time()-t0:.1f}s)")
+        except Exception as e:
+            logger.warning(f"[!] Local whisper failed: {e}")
         if not user_text:
-            logger.warning("[!] MiMo ASR returned empty, applying contextual transcription")
+            user_text = self.mimo.recognize_speech(wav_data)
+        if not user_text:
+            logger.warning("[!] All ASR failed, using fallback text")
             user_text = "我想给网站加一个新的景点故事！"
 
         logger.info(f"🗣️ [Recognized Lele's Words]: '{user_text}'")
