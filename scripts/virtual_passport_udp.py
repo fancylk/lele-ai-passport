@@ -82,7 +82,7 @@ def wait_proposal(timeout=60):
     log("!! no proposal within timeout")
     return None
 
-def wait_task_done(timeout=90):
+def wait_task_done(timeout=600):
     buf = b""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -94,6 +94,9 @@ def wait_task_done(timeout=90):
                 try:
                     pkt = json.loads(line.decode("utf-8"))
                 except Exception:
+                    continue
+                if pkt.get("type") == "task_progress":
+                    log(f"<- PROGRESS [{pkt.get('elapsed_min')}min] {pkt.get('stage')} ({pkt.get('progress')}%)")
                     continue
                 if pkt.get("type") == "task_done":
                     log("<- TASK_DONE:", pkt.get("title"), pkt.get("message"))
@@ -120,7 +123,7 @@ def main():
 
     # Step 3: user presses OK to confirm
     time.sleep(1)
-    send_json({"type": "confirm_task", "title": prop.get("title", ""), "desc": prop.get("desc", ""), "quiz": prop.get("quiz", "")})
+    send_json({"type": "confirm_task", "title": prop.get("title", ""), "desc": prop.get("desc", ""), "quiz": prop.get("quiz", ""), "user_text": prop.get("user_text", "")})
 
     # Step 4: wait task_done (git push + webhook deploy)
     done = wait_task_done()

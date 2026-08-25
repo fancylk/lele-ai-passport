@@ -77,18 +77,20 @@ class LeleBridgeService:
             f.write(wav_data)
         logger.info(f"[+] Saved recorded WAV to {rec_path}")
 
-        # 1. ASR: 本地 faster-whisper 优先（免费），失败再试 MiMo ASR
-        user_text = ""
-        try:
-            from local_asr import transcribe_wav
-            t0 = time.time()
-            user_text = await_free(transcribe_wav, wav_data)
-            if user_text:
-                logger.info(f"[+] Local whisper ASR ({time.time()-t0:.1f}s)")
-        except Exception as e:
-            logger.warning(f"[!] Local whisper failed: {e}")
+        # 1. ASR: MiMo 优先（准确），失败降级本地 whisper（免费）
+        t0 = time.time()
+        user_text = self.mimo.recognize_speech(wav_data)
+        if user_text:
+            logger.info(f"[+] MiMo ASR ({time.time()-t0:.1f}s)")
         if not user_text:
-            user_text = self.mimo.recognize_speech(wav_data)
+            try:
+                from local_asr import transcribe_wav
+                t0 = time.time()
+                user_text = await_free(transcribe_wav, wav_data)
+                if user_text:
+                    logger.info(f"[+] Local whisper ASR ({time.time()-t0:.1f}s)")
+            except Exception as e:
+                logger.warning(f"[!] Local whisper failed: {e}")
         if not user_text:
             logger.warning("[!] All ASR failed, using fallback text")
             user_text = "我想给网站加一个新的景点故事！"
@@ -115,11 +117,18 @@ class LeleBridgeService:
         try:
             task_id = str(int(time.time() * 1000))
 
-            # 1. 构建 AI 编码任务（交给 tmux 常驻的 lele-coder worker / opencode 会话执行）
+            # 1. 构建 AI 编码任务（交给 tmux 常驻的 lele-coder worker / omp 会话执行）
             prompt = (
-                f"需求来自小朋友乐乐的语音：\"{user_text or title}\"\n"
-                f"任务标题：{title}\n补充说明：{desc}\n"
-                "请按 AGENTS.md 的约定修改本仓库代码实现这个需求。完成后不要 commit/push。"
+                "【需求背景】下面这句话是 10 岁小朋友乐乐对着工牌麦克风说出的原话，"
+                "她看不到这段提示词。请忠实还原她的愿望并完整实现：\n"
+                f"「{user_text or title}」\n\n"
+                f"【补充信息】{desc or '无'}\n\n"
+                "【要求】\n"
+                "1. 质量优先：先确保真正理解她想要什么（她可能表达得比较口语化、模糊），"
+                "按她的意图做出具体、有趣、适合 10 岁孩子的效果，宁可多做一点也不要草率交差；\n"
+                "2. 遵守本仓库 AGENTS.md 的约定（结构速览、禁止事项）；\n"
+                "3. 内容改动一次做完整：故事文本/讲稿/页面入口与统计数字保持一致；\n"
+                "4. 完成后不要 commit/push（外部流水线处理）。\n"
             )
             task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
             done_dir = os.path.join(task_dir, "done")
@@ -140,6 +149,26 @@ class LeleBridgeService:
         result_file = os.path.join(done_dir, f"{task_id}.result.json")
         deadline = time.time() + timeout_sec
         result = None
+
+        # 进度阶段定义（给孩子看得懂的提示）
+        stages = [
+            (0,   "🤖 AI 工程师开工啦"),
+            (60,  "📖 正在读网站代码"),
+            (150, "✏️ 正在写你的新内容"),
+            (300, "🔍 检查中，马上好"),
+            (450, "⏳ 工程师还在认真改，再等等"),
+        ]
+        stage_idx = 0
+        start_t = time.time()
+        sent_progress = False
+
+        def send_pkt(pkt):
+            data = (json.dumps(pkt, ensure_ascii=False) + "\n").encode("utf-8")
+            if card_ip and card_port:
+                self.sock.sendto(data, (card_ip, card_port))
+            else:
+                self.sock.sendto(data, (self.broadcast_ip, self.port))
+
         while time.time() < deadline:
             if os.path.isfile(result_file):
                 try:
@@ -149,7 +178,18 @@ class LeleBridgeService:
                     result = None
                 if result is not None:
                     break
-            # 执行中给工牌发进度心跳（可选）
+
+            # 每 20s 检查是否进入下一个阶段，发进度心跳给工牌
+            elapsed = time.time() - start_t
+            if stage_idx < len(stages) and elapsed >= stages[stage_idx][0]:
+                label = stages[stage_idx][1]
+                mins = int(elapsed // 60)
+                progress = min(90, int(elapsed / timeout_sec * 100))
+                send_pkt({"type": "task_progress", "title": title,
+                          "stage": label, "elapsed_min": mins, "progress": progress})
+                logger.info(f"[~] progress -> {label} ({mins}m)")
+                stage_idx += 1
+                sent_progress = True
             time.sleep(5)
 
         if not result:
@@ -167,11 +207,7 @@ class LeleBridgeService:
                 logger.warning(f"[!] Coding task {task_id} produced no changes")
 
         notify = {"type": "task_done", "title": "🎉 任务完成！", "message": msg, "commit": commit or "none"}
-        data = (json.dumps(notify, ensure_ascii=False) + "\n").encode("utf-8")
-        if card_ip and card_port:
-            self.sock.sendto(data, (card_ip, card_port))
-        else:
-            self.sock.sendto(data, (self.broadcast_ip, self.port))
+        send_pkt(notify)
 
     def run(self):
         self.running = True
