@@ -16,7 +16,7 @@ export PATH="$HOME/.npm-global/bin:$PATH"
 export ZHIPU_API_KEY="sk-f155d9569c5845e998df8861b880297a.uqua7IxQP9GgOvGH"
 export ZHIPUAI_API_KEY="$ZHIPU_API_KEY"
 CODER_BIN="${LELE_CODER_BIN:-$OMP}"
-MODEL="${LELE_CODER_MODEL:-zhipu-coding-plan/glm-5.3}"
+MODEL="${LELE_CODER_MODEL:-openai-codex/gpt-5.6-luna}"
 TASK_TIMEOUT="${LELE_TASK_TIMEOUT:-1500}"
 
 mkdir -p "$TASK_DIR" "$DONE_DIR" "$LOG_DIR"
