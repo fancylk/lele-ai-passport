@@ -75,19 +75,17 @@ class LeleBridgeService:
         user_text = self.mimo.recognize_speech(wav_data)
         if not user_text:
             logger.warning("[!] MiMo ASR returned empty, applying contextual transcription")
-            user_text = "我想给开封加一个包公断案的故事！"
+            user_text = "我想给网站加一个新的景点故事！"
 
         logger.info(f"🗣️ [Recognized Lele's Words]: '{user_text}'")
 
-        # 2. Call MiMo LLM to generate proposal
-        prop = self.mimo.generate_tour_proposal(user_text, current_city="开封", current_spot="鼓楼夜市")
-
+        # 2. 提案 = 识别文字的确认回显（乐乐确认后才会交给 AI 编码会话执行）
         proposal_packet = {
             "type": "proposal",
             "user_text": user_text,
-            "title": prop.get("title", "开封府 · 包公断案"),
-            "desc": prop.get("desc", "铁面无私包青天断奇案"),
-            "quiz": prop.get("quiz", "三口铡刀分别铡谁？")
+            "title": user_text[:24],
+            "desc": "确认后交给 AI 工程师修改 trip 网站",
+            "quiz": ""
         }
         data = (json.dumps(proposal_packet, ensure_ascii=False) + "\n").encode("utf-8")
         if card_ip and card_port:
@@ -96,54 +94,68 @@ class LeleBridgeService:
             self.sock.sendto(data, (self.broadcast_ip, self.port))
         logger.info(f"[+] Sent proposal back to card screen: {proposal_packet['title']}")
 
-    def handle_task_confirmation(self, title: str, desc: str, quiz: str, card_ip: str = None, card_port: int = None):
-        logger.info(f"🎉 [Lele Confirmed Task]: '{title}'")
+    def handle_task_confirmation(self, title: str, desc: str, quiz: str, card_ip: str = None, card_port: int = None, user_text: str = ""):
+        logger.info(f"🎉 [Lele Confirmed Coding Task]: '{title}'")
         try:
-            # 1. Update version.json to trigger iPad auto-reload
-            ver_file = os.path.join(REPO_PATH, "version.json")
-            new_ver = int(time.time())
-            
-            # 2. Synthesize audio narration via Xiaomi MiMo TTS
-            audio_fname = f"narration_{new_ver}.wav"
-            audio_dest = os.path.join(REPO_PATH, "audio", audio_fname)
-            os.makedirs(os.path.dirname(audio_dest), exist_ok=True)
-            
-            narration_text = f"乐乐小导游新任务发布！{title}。{desc}。快考考爸爸妈妈：{quiz}"
-            audio_data = self.mimo.synthesize_speech(narration_text)
-            if audio_data:
-                with open(audio_dest, "wb") as f:
-                    f.write(audio_data)
-                logger.info(f"[+] Generated MiMo TTS narration: {audio_dest}")
+            task_id = str(int(time.time() * 1000))
 
-            with open(ver_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "version": new_ver,
-                    "updated_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                    "msg": f"乐乐小导游发布了新任务：{title}",
-                    "audio_url": f"./audio/{audio_fname}"
-                }, f, indent=2, ensure_ascii=False)
+            # 1. 构建 AI 编码任务（交给 tmux 常驻的 lele-coder worker / opencode 会话执行）
+            prompt = (
+                f"需求来自小朋友乐乐的语音：\"{user_text or title}\"\n"
+                f"任务标题：{title}\n补充说明：{desc}\n"
+                "请按 AGENTS.md 的约定修改本仓库代码实现这个需求。完成后不要 commit/push。"
+            )
+            task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
+            done_dir = os.path.join(task_dir, "done")
+            os.makedirs(done_dir, exist_ok=True)
+            with open(os.path.join(task_dir, f"{task_id}.task"), "w", encoding="utf-8") as f:
+                json.dump({"id": task_id, "title": title, "desc": desc, "quiz": quiz,
+                           "user_text": user_text, "prompt": prompt}, f, ensure_ascii=False)
+            logger.info(f"[+] Coding task {task_id} queued for lele-coder worker")
 
-            # 3. Git commit & push via Deploy Key
-            subprocess.run(["git", "add", "."], cwd=REPO_PATH, check=True)
-            commit_msg = f"feat(guide): 乐乐小导游发布新任务 [{title}]"
-            subprocess.run(["git", "commit", "-m", commit_msg], cwd=REPO_PATH, check=True)
-            subprocess.run(["git", "push", "origin", "main"], cwd=REPO_PATH, check=True)
-            logger.info("[+] Successfully pushed to GitHub! Webhook triggered.")
-
-            # 4. Notify card
-            notify_packet = {
-                "type": "task_done",
-                "title": "🎉 任务已发布！",
-                "message": "快看 iPad 上的新内容！"
-            }
-            data = (json.dumps(notify_packet, ensure_ascii=False) + "\n").encode("utf-8")
-            if card_ip and card_port:
-                self.sock.sendto(data, (card_ip, card_port))
-            else:
-                self.sock.sendto(data, (self.broadcast_ip, self.port))
-
+            # 2. 后台监控执行结果（worker 写 done/<id>.result.json）
+            threading.Thread(target=self._watch_coding_result,
+                             args=(task_id, title, card_ip, card_port), daemon=True).start()
         except Exception as e:
             logger.error(f"[!] Task confirmation error: {e}")
+
+    def _watch_coding_result(self, task_id: str, title: str, card_ip=None, card_port=None, timeout_sec=1560):
+        done_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks", "done")
+        result_file = os.path.join(done_dir, f"{task_id}.result.json")
+        deadline = time.time() + timeout_sec
+        result = None
+        while time.time() < deadline:
+            if os.path.isfile(result_file):
+                try:
+                    with open(result_file, encoding="utf-8") as f:
+                        result = json.load(f)
+                except Exception:
+                    result = None
+                if result is not None:
+                    break
+            # 执行中给工牌发进度心跳（可选）
+            time.sleep(5)
+
+        if not result:
+            logger.error(f"[!] Coding task {task_id} timed out")
+            msg, changed, commit = "任务超时了，等会再试试吧", 0, ""
+        else:
+            changed = result.get("changed")
+            commit = result.get("commit", "")
+            summary = (result.get("summary") or "")[:80]
+            if changed and commit:
+                msg = f"改好啦！快看 iPad（{commit}）{summary}"
+                logger.info(f"[+] Coding task {task_id} done: commit {commit}")
+            else:
+                msg = f"这次没有产生代码修改。{summary}"
+                logger.warning(f"[!] Coding task {task_id} produced no changes")
+
+        notify = {"type": "task_done", "title": "🎉 任务完成！", "message": msg, "commit": commit or "none"}
+        data = (json.dumps(notify, ensure_ascii=False) + "\n").encode("utf-8")
+        if card_ip and card_port:
+            self.sock.sendto(data, (card_ip, card_port))
+        else:
+            self.sock.sendto(data, (self.broadcast_ip, self.port))
 
     def run(self):
         self.running = True
@@ -177,10 +189,12 @@ class LeleBridgeService:
                             threading.Thread(target=self.process_incoming_audio, args=(pcm_copy, card_ip, addr[1]), daemon=True).start()
                             continue
                         elif msg_type == "confirm_task":
-                            title = pkt.get("title", "新景点探秘")
+                            title = pkt.get("title", "乐乐的新需求")
                             desc = pkt.get("desc", "")
                             quiz = pkt.get("quiz", "")
-                            threading.Thread(target=self.handle_task_confirmation, args=(title, desc, quiz, card_ip, addr[1]), daemon=True).start()
+                            user_text = pkt.get("user_text", "") or title
+                            threading.Thread(target=self.handle_task_confirmation,
+                                             args=(title, desc, quiz, card_ip, addr[1], user_text), daemon=True).start()
                             continue
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         # Raw binary PCM chunk
