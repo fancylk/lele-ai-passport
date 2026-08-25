@@ -27,7 +27,7 @@ static const char *TAG = "lele_guide";
 
 #define WIFI_SSID       "CMCC-Ab9h"
 #define WIFI_PASS       "tvakk9k8"
-#define BRIDGE_IP       "192.168.31.102"
+#define BRIDGE_IP       "124.221.187.167"
 #define UDP_PORT        8888
 
 #define SAMPLE_RATE     16000
