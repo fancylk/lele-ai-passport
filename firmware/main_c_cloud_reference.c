@@ -24,6 +24,7 @@ static const demo_entry_t DEMOS[] = {
     { "乐乐导游", demo_lele_guide_enter, demo_lele_guide_exit, demo_lele_guide_key },
     { "俄罗斯方块", demo_tetris_enter, demo_tetris_exit, demo_tetris_key },
     { "左右接球", demo_catch_enter, demo_catch_exit, demo_catch_key },
+    { "答案之书", demo_answer_enter, demo_answer_exit, demo_answer_key },
 };
 #define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
 
@@ -123,6 +124,8 @@ void app_main(void) {
     // 两个应用都依赖全部外设：任一失败即标记不可用
     s_ok[0] = btn_ok && audio_ok;
     s_ok[1] = btn_ok;
+    s_ok[2] = btn_ok;
+    s_ok[3] = btn_ok;
     ESP_LOGI(TAG, "periph: btn=%d audio=%d batt=%d", btn_ok, audio_ok, batt_ok);
 
     // 字体自检：验证中文字形可查
