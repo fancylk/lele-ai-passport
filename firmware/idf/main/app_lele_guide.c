@@ -402,7 +402,7 @@ void demo_lele_guide_enter(void) {
     lv_obj_set_style_border_width(col, 0, 0);
     lv_obj_set_style_pad_all(col, 0, 0);
     lv_obj_set_style_pad_column(col, 0, 0);
-    lv_obj_set_style_pad_row(col, 4, 0);
+    lv_obj_set_style_pad_row(col, 6, 0);
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
@@ -422,23 +422,24 @@ void demo_lele_guide_enter(void) {
     lv_obj_set_style_pad_left(s_lbl_sub, 5, 0);
     lv_label_set_long_mode(s_lbl_sub, LV_LABEL_LONG_DOT);
 
-    // 主体：典故/美食（弹性占据剩余空间，可滚动查看超长内容）
+    // 主体：典故/美食（弹性占剩余空间 3/5,文字顶排,余量变节间距）
     s_lbl_poem = lv_label_create(col);
     lv_obj_set_style_text_font(s_lbl_poem, &lv_font_cn14, 0);
     lv_obj_set_style_text_color(s_lbl_poem, lv_color_hex(0x2B2B2B), 0);
     lv_obj_set_width(s_lbl_poem, 232);
     lv_obj_set_style_pad_left(s_lbl_poem, 5, 0);
     lv_obj_set_style_pad_right(s_lbl_poem, 5, 0);
-    lv_obj_set_flex_grow(s_lbl_poem, 1);
+    lv_obj_set_flex_grow(s_lbl_poem, 3);
     lv_label_set_long_mode(s_lbl_poem, LV_LABEL_LONG_WRAP);
 
-    // 次要：好玩/考题（固定底部区域上方，2行）
+    // 次要：好玩/考题（弹性占剩余空间 2/5,紧跟其后,贴近底部操作栏）
     s_lbl_desc = lv_label_create(col);
     lv_obj_set_style_text_font(s_lbl_desc, &lv_font_cn14, 0);
     lv_obj_set_style_text_color(s_lbl_desc, lv_color_hex(0x3D5A45), 0);
     lv_obj_set_width(s_lbl_desc, 232);
     lv_obj_set_style_pad_left(s_lbl_desc, 5, 0);
     lv_obj_set_style_pad_right(s_lbl_desc, 5, 0);
+    lv_obj_set_flex_grow(s_lbl_desc, 2);
     lv_label_set_long_mode(s_lbl_desc, LV_LABEL_LONG_WRAP);
 
     // 操作提示
