@@ -181,6 +181,7 @@ static void render_page(void) {
     if (!bsp_lvgl_lock(500)) return;
 
     char title_buf[80];
+    char para_buf[300];
     snprintf(title_buf, sizeof(title_buf), "%s · %s (%d/%d)",
              sp->city, sp->spot, s_spot_idx + 1, (int)SPOTS_COUNT);
     lv_label_set_text(s_lbl_title, title_buf);
@@ -188,13 +189,14 @@ static void render_page(void) {
 
     if (s_page == 0) {
         lv_label_set_text(s_lbl_poem, sp->story);
-        lv_label_set_text(s_lbl_desc, sp->fun);
-        lv_label_set_text(s_lbl_action, "OK:好吃和考题  下:下一景");
+        snprintf(para_buf, sizeof(para_buf), "\n%s", sp->fun);
+        lv_label_set_text(s_lbl_desc, para_buf);
     } else {
         lv_label_set_text(s_lbl_poem, sp->food);
-        lv_label_set_text(s_lbl_desc, sp->quiz);
-        lv_label_set_text(s_lbl_action, "OK:回典故  下:下一景");
+        snprintf(para_buf, sizeof(para_buf), "\n%s", sp->quiz);
+        lv_label_set_text(s_lbl_desc, para_buf);
     }
+    lv_label_set_text(s_lbl_action, "OK:下一页  下:下一景");
     bsp_lvgl_unlock();
 }
 
@@ -422,33 +424,32 @@ void demo_lele_guide_enter(void) {
     lv_obj_set_style_pad_left(s_lbl_sub, 5, 0);
     lv_label_set_long_mode(s_lbl_sub, LV_LABEL_LONG_DOT);
 
-    // 主体：典故/美食（弹性占剩余空间 3/5,文字顶排,余量变节间距）
+    // 主体：典故/美食（流式布局,文字往下堆,余量留在页尾）
     s_lbl_poem = lv_label_create(col);
     lv_obj_set_style_text_font(s_lbl_poem, &lv_font_cn14, 0);
     lv_obj_set_style_text_color(s_lbl_poem, lv_color_hex(0x2B2B2B), 0);
     lv_obj_set_width(s_lbl_poem, 232);
     lv_obj_set_style_pad_left(s_lbl_poem, 5, 0);
     lv_obj_set_style_pad_right(s_lbl_poem, 5, 0);
-    lv_obj_set_flex_grow(s_lbl_poem, 3);
     lv_label_set_long_mode(s_lbl_poem, LV_LABEL_LONG_WRAP);
 
-    // 次要：好玩/考题（弹性占剩余空间 2/5,紧跟其后,贴近底部操作栏）
+    // 次要：好玩/考题（空一行作段落间隔,最多一行）
     s_lbl_desc = lv_label_create(col);
     lv_obj_set_style_text_font(s_lbl_desc, &lv_font_cn14, 0);
     lv_obj_set_style_text_color(s_lbl_desc, lv_color_hex(0x3D5A45), 0);
     lv_obj_set_width(s_lbl_desc, 232);
     lv_obj_set_style_pad_left(s_lbl_desc, 5, 0);
     lv_obj_set_style_pad_right(s_lbl_desc, 5, 0);
-    lv_obj_set_flex_grow(s_lbl_desc, 2);
     lv_label_set_long_mode(s_lbl_desc, LV_LABEL_LONG_WRAP);
 
-    // 操作提示
-    s_lbl_action = lv_label_create(col);
+    // 操作提示（固定屏幕底部,不随内容流式排布）
+    s_lbl_action = lv_label_create(s_scr);
     lv_obj_set_style_text_font(s_lbl_action, &lv_font_cn14, 0);
     lv_obj_set_style_text_color(s_lbl_action, lv_color_hex(0x999999), 0);
     lv_obj_set_width(s_lbl_action, 232);
     lv_obj_set_style_pad_left(s_lbl_action, 5, 0);
     lv_label_set_long_mode(s_lbl_action, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_lbl_action, LV_ALIGN_BOTTOM_MID, 0, -4);
 
     lele_guide_start_wifi_impl();
     update_guide_ui();
