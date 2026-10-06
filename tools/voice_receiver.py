@@ -16,6 +16,7 @@ Ctrl-C 退出并打印汇总. 后台托管用 voice_receiver.sh start|stop|statu
 
 import argparse
 import socket
+import struct
 import sys
 import time
 
@@ -119,6 +120,7 @@ def main():
         sub_last = 0.0
         probe_last = 0.0
         rtt_ms = None
+        ping_sent_at = None
         print(f"[+] 订阅模式: udp://{args.relay}:{args.port} (SUB 每{SUB_EVERY:.0f}s)")
     else:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -160,13 +162,19 @@ def main():
                     sock.sendto(b"SUB" + token, (args.relay, args.port))
                 if now - probe_last >= PROBE_EVERY or probe_last == 0:
                     probe_last = now
-                    psock.sendto(b"PING" + b"\x00" * 8, (args.relay, args.ping_port))
+                    ping_sent_at = time.time()
+                    psock.sendto(b"PING" + struct.pack("<d", ping_sent_at),
+                                 (args.relay, args.ping_port))
                 # 收 PONG
                 try:
                     while True:
                         d, _ = psock.recvfrom(64)
                         if len(d) >= 12 and d[:4] == b"PONG":
-                            rtt_ms = (time.time() - now) * 1000
+                            try:
+                                sent = struct.unpack("<d", d[4:12])[0]
+                                rtt_ms = (time.time() - sent) * 1000
+                            except (struct.error, ValueError):
+                                rtt_ms = (time.time() - (ping_sent_at or now)) * 1000
                 except (BlockingIOError, socket.timeout):
                     pass
                 except Exception:
