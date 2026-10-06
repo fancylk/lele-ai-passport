@@ -1,70 +1,48 @@
 """
-Lele AI Tour Guide 3-Step Interactive Confirmation Application with Rich Sound Effects.
-1. Hold UP: Ding-dong chime & speak -> 2. Release UP: Ta-da! proposal with MiMo voice -> 3. Press OK: Victory fanfare & deploy!
+乐乐语音桥 (Lele Voice Bridge) —— 常开麦克风 → UDP 推流 → Mac/BlackHole.
+
+按键: 上=静音切换  下=立即测延迟  OK=主页/详情翻页
+屏幕实时显示到主机端的延迟(RTT)/码率/丢包/信号, 用于评估链路质量.
+(旧三步导游版见 git 历史: 重写前的 main.py)
 """
 
+import gc
 import sys
 import time
-import json
-import select
 from machine import Pin, SPI, ADC, I2C
-from config import *
+from config import (STREAM_IP, STREAM_PORT, PING_PORT, SAMPLE_RATE, CHUNK_BYTES)
 from st7789_direct import ST7789Direct
-from lele_ui import LeleUI, STATE_GUIDE, STATE_LISTENING, STATE_PROPOSAL, STATE_DEPLOYING, STATE_SUCCESS
+from chinese_font import draw_string_cn
 from wifi_manager import WiFiManager
-from audio_player import AudioPlayer
 from battery import BatteryGauge
-from spots_data import SPOTS
+from voice_stream import VoiceStream
 
-# 1. Initialize Display
-spi = SPI(1, baudrate=30000000, polarity=0, phase=0, sck=Pin(PIN_LCD_SCLK), mosi=Pin(PIN_LCD_MOSI))
-display = ST7789Direct(
-    spi=spi,
-    width=SCREEN_WIDTH,
-    height=SCREEN_HEIGHT,
-    cs=Pin(PIN_LCD_CS),
-    dc=Pin(PIN_LCD_DC),
-    rst=None,
-    bl=Pin(PIN_LCD_BL),
-    rotation=SCREEN_ROTATION
-)
+# --- 颜色 ---
+C_BG      = 0x0841
+C_BAR     = 0x000F
+C_WHITE   = 0xFFFF
+C_GREY    = 0xC618
+C_GREEN   = 0x07E0
+C_RED     = 0xF800
+C_YELLOW  = 0xFFE0
+C_CYAN    = 0x07FF
+C_ORANGE  = 0xFD20
 
-ui = LeleUI(display=display, width=SCREEN_WIDTH, height=SCREEN_HEIGHT)
-curr_spot_idx = 0
-ui.update_guide(SPOTS[curr_spot_idx])
+BOOT_TIME = time.ticks_ms()
 
-# 2. Shared I2C for ES8311 & CW2017
-shared_i2c = None
-try:
-    shared_i2c = I2C(0, sda=Pin(PIN_I2C_SDA), scl=Pin(PIN_I2C_SCL), freq=100000)
-except Exception:
-    pass
 
-audio = AudioPlayer(i2c=shared_i2c, addr=0x18)
-battery = BatteryGauge(i2c=shared_i2c, addr=0x63)
-ui.battery_pct, _ = battery.get_info()
+def setup_display():
+    spi = SPI(1, baudrate=30000000, polarity=0, phase=0,
+              sck=Pin(8), mosi=Pin(9))
+    return ST7789Direct(spi=spi, width=240, height=320,
+                        cs=Pin(1), dc=Pin(20), rst=None, bl=Pin(21), rotation=0)
 
-# 3. ADC Keypad on GPIO 0
-adc = ADC(Pin(PIN_BTN_ADC))
-try:
-    adc.atten(ADC.ATTN_11DB)
-except Exception:
-    pass
 
-# 4. WiFi Manager
-wifi = WiFiManager()
-try:
-    wifi.connect(timeout=4)
-except Exception:
-    pass
-
-def read_btn():
+def read_btn(adc):
     try:
-        raw = adc.read()
-        mv = (raw * 3300) // 4095
+        mv = (adc.read() * 3300) // 4095
     except Exception:
         return None
-
     if mv < 300:
         return "UP"
     elif 300 <= mv < 800:
@@ -73,142 +51,175 @@ def read_btn():
         return "OK"
     return None
 
-def send_packet(d):
-    pkt = (json.dumps(d, ensure_ascii=False) + "\n")
-    sys.stdout.write(pkt)
-    if wifi.is_connected:
-        wifi.send_udp(pkt)
 
-# Voice Scenarios
-SCENARIOS = [
-    {
-        "voice": "我想给开封加一个包公断案的故事！",
-        "title": "开封府 · 包公断案与三口铜铡",
-        "desc": "铁面无私包青天断奇案，设计考考爸妈三口铡刀名字！",
-        "quiz": "龙头铡、虎头铡、狗头铡分别铡谁？"
-    },
-    {
-        "voice": "我想了解华山沉香救母的神话！",
-        "title": "华山西峰 · 沉香劈山救母巨石",
-        "desc": "寻找西峰神石，背诵北宋神童寇准7岁咏华山名诗！",
-        "quiz": "沉香一斧劈开两半的巨石在哪个峰？"
-    },
-    {
-        "voice": "我想知道大雁塔唐僧玄奘的故事！",
-        "title": "大雁塔 · 玄奘西行五万里传奇",
-        "desc": "玄奘法师独自西行17年取回657部真经建塔故事！",
-        "quiz": "大雁塔是哪位唐代高僧主持修建的？"
-    },
-    {
-        "voice": "我想在洛阳龙门石窟加一个寻宝任务！",
-        "title": "龙门石窟 · 寻找卢舍那大佛微笑",
-        "desc": "打卡东方蒙娜丽莎与大诗人白居易琵琶峰墓园！",
-        "quiz": "卢舍那大佛的面容是按哪位皇帝雕刻的？"
-    }
-]
-scen_idx = 0
+class BridgeUI:
+    """两页式界面: 0=主页(状态+延迟) 1=详情(网络/统计)."""
 
-def handle_incoming_json(line_str):
-    if not line_str:
-        return
-    try:
-        pkt = json.loads(line_str)
-    except Exception:
-        return
+    def __init__(self, display):
+        self.d = display
+        self.page = 0
 
-    msg_type = pkt.get("type")
-    if msg_type == "proposal":
-        audio.play_proposal_ready()
-        ui.show_proposal(pkt.get("user_text", ""), pkt.get("title", ""), pkt.get("desc", ""), pkt.get("quiz", ""))
-    elif msg_type == "task_done":
-        audio.play_send_success()
-        ui.show_success()
-        time.sleep(2.8)
-        ui.show_guide()
+    def frame(self):
+        self.d.fill(C_BG)
+        self.d.fill_rect(0, 0, 240, 36, C_BAR)
+        draw_string_cn(self.d, "乐乐语音桥", 8, 10, C_WHITE, C_BAR)
+        self.d.fill_rect(0, 296, 240, 24, C_BAR)
+        draw_string_cn(self.d, "上静音 下测延 OK翻页", 8, 301, C_GREY, C_BAR)
+
+    def text(self, s, x, y, fg, bg=C_BG):
+        draw_string_cn(self.d, s, x, y, fg, bg)
+
+    def clear_body(self):
+        self.d.fill_rect(0, 36, 240, 260, C_BG)
+
+
+def fmt_bytes(n):
+    if n >= 1 << 20:
+        return "%.1fMB" % (n / (1 << 20))
+    if n >= 1 << 10:
+        return "%.1fKB" % (n / (1 << 10))
+    return "%dB" % n
+
 
 def main():
-    global curr_spot_idx, scen_idx
-    print("[+] Lele Interactive Tour Guide App Running.")
-    poll_obj = select.poll()
-    poll_obj.register(sys.stdin, select.POLLIN)
-    line_buf = []
-    last_btn_time = 0
+    print("[+] Lele Voice Bridge boot")
+    display = setup_display()
+    ui = BridgeUI(display)
+
+    shared_i2c = None
+    try:
+        shared_i2c = I2C(0, sda=Pin(10), scl=Pin(7), freq=100000)
+    except Exception:
+        pass
+
+    battery = BatteryGauge(i2c=shared_i2c, addr=0x63)
+
+    wifi = WiFiManager()
+    connected = False
+    try:
+        connected = wifi.connect(timeout=6)
+    except Exception:
+        pass
+
+    voice = VoiceStream(i2c=shared_i2c)
+    codec_ok = voice.init_codec()
+    stream_ok = voice.start() if codec_ok else False
+    if not stream_ok:
+        ui.frame()
+        ui.text("音频链路初始化失败!", 8, 60, C_RED)
+        ui.text("检查 I2S/ES8311/UDP", 8, 90, C_GREY)
+        draw_string_cn(display, "查看 REPL 日志", 8, 120, C_YELLOW, C_BG)
+
+    adc = ADC(Pin(0))
+    try:
+        adc.atten(ADC.ATTN_11DB)
+    except Exception:
+        pass
+
+    ui.frame()
+    last_ui = 0
     last_btn = None
+    last_btn_time = 0
+    show_rtt = None
 
     while True:
-        # Serial & WiFi poll
-        events = poll_obj.poll(1)
-        for fd, ev in events:
-            if ev & select.POLLIN:
-                chunk = sys.stdin.read(1)
-                if chunk:
-                    if chunk == '\n':
-                        line = "".join(line_buf).strip()
-                        line_buf.clear()
-                        handle_incoming_json(line)
-                    else:
-                        line_buf.append(chunk)
-
-        udp_pkt = wifi.poll_udp()
-        if udp_pkt:
-            handle_incoming_json(udp_pkt)
-
-        # Key scan
-        now = time.time()
-        btn = read_btn()
-
-        if ui.state == STATE_GUIDE:
-            # 1. Hold UP -> Ding-dong chime & speech screen
-            if btn == "UP":
-                audio.play_record_start()
-                ui.show_listening()
-            elif btn and btn != last_btn:
-                if now - last_btn_time > 0.2:
-                    last_btn_time = now
-                    if btn == "DOWN":
-                        audio.play_click()
-                        curr_spot_idx = (curr_spot_idx + 1) % len(SPOTS)
-                        ui.update_guide(SPOTS[curr_spot_idx])
-                    elif btn == "OK":
-                        audio.play_click()
-                        send_packet({"type": "ping"})
-
-        elif ui.state == STATE_LISTENING:
-            # 2. Release UP -> Ta-da chime & proposal screen!
-            if btn != "UP":
-                audio.play_record_stop()
-                time.sleep(0.1)
-                audio.play_proposal_ready()
-                curr_scen = SCENARIOS[scen_idx]
-                scen_idx = (scen_idx + 1) % len(SCENARIOS)
-                ui.show_proposal(curr_scen["voice"], curr_scen["title"], curr_scen["desc"], curr_scen["quiz"])
-                last_btn_time = now
-
-        elif ui.state == STATE_PROPOSAL:
-            # 3. Confirm (OK) or Cancel (DOWN)
-            if btn and btn != last_btn:
-                if now - last_btn_time > 0.3:
-                    last_btn_time = now
-                    if btn == "OK":
-                        # Confirmed! -> Deploy with Victory Fanfare
-                        ui.show_deploying()
-                        send_packet({
-                            "type": "confirm_task",
-                            "title": ui.prop_title,
-                            "desc": ui.prop_desc,
-                            "quiz": ui.prop_quiz
-                        })
-                        time.sleep(1.8)
-                        audio.play_send_success()
-                        ui.show_success()
-                        time.sleep(2.8)
-                        ui.show_guide()
-                    elif btn == "DOWN":
-                        audio.play_cancel()
-                        ui.show_guide()
-
+        now = time.ticks_ms()
+        btn = read_btn(adc)
+        if btn and btn != last_btn and time.ticks_diff(now, last_btn_time) > 200:
+            last_btn_time = now
+            if btn == "UP" and stream_ok:
+                voice.set_muted(not voice.muted)
+                ui.clear_body()          # 状态行变色, 整体重画
+                last_ui = 0
+            elif btn == "DOWN" and stream_ok:
+                voice._last_ping_ms = 0  # 立即触发一次 PING
+                voice._poll_ping()
+            elif btn == "OK":
+                ui.page = 1 - ui.page
+                ui.frame()
+                ui.clear_body()
+                last_ui = 0
         last_btn = btn
-        time.sleep(0.01)
+
+        if stream_ok:
+            voice.poll()                 # 32ms 节拍
+
+        # WiFi 看门狗
+        if wifi.wlan and not wifi.wlan.isconnected():
+            connected = False
+            try:
+                wifi.connect(timeout=4)
+                connected = wifi.is_connected
+            except Exception:
+                pass
+
+        # 每 500ms 刷新一屏
+        if time.ticks_diff(time.ticks_ms(), last_ui) >= 500:
+            last_ui = time.ticks_ms()
+            try:
+                ui.battery_pct, _ = battery.get_info()
+            except Exception:
+                pass
+            rssi = None
+            try:
+                if wifi.wlan.isconnected():
+                    rssi = wifi.wlan.status("rssi")
+            except Exception:
+                pass
+
+            if ui.page == 0:
+                y = 48
+                ui.clear_body()
+                # 状态行
+                if not connected:
+                    ui.text("✗ WiFi 未连接", 8, y, C_RED); y += 26
+                elif not stream_ok:
+                    ui.text("✗ 推流未启动", 8, y, C_RED); y += 26
+                elif voice.muted:
+                    ui.text("⏸ 已静音 (暂停发送)", 8, y, C_YELLOW); y += 26
+                else:
+                    ui.text("● 推流中 → Mac", 8, y, C_GREEN); y += 26
+                # 延迟大字
+                rtt = voice.rtt_ms if (time.ticks_diff(
+                    time.ticks_ms(), voice.last_pong_ms or 0) < 4000) else None
+                if rtt is None:
+                    ui.text("延迟 RTT: ---", 8, y + 6, C_GREY)
+                else:
+                    show_rtt = rtt
+                    color = C_GREEN if rtt < 30 else (C_YELLOW if rtt < 80 else C_RED)
+                    ui.text("延迟 RTT: %dms" % rtt, 8, y + 6, color)
+                y += 40
+                ui.text("主机 %s:%d" % (STREAM_IP, STREAM_PORT), 8, y, C_GREY); y += 26
+                ui.text("码率: %dkbps" % (SAMPLE_RATE * 16 // 1024), 8, y, C_WHITE); y += 26
+                ui.text("已发: %s (%d包)" % (fmt_bytes(voice.bytes_sent), voice.pkts), 8, y, C_WHITE); y += 26
+                sig = ("%d dBm" % rssi) if rssi else "---"
+                ui.text("WiFi 信号: %s" % sig, 8, y, C_WHITE); y += 26
+                ui.text("电量: %d%%" % ui.battery_pct, 8, y, C_WHITE)
+            else:
+                y = 48
+                ui.clear_body()
+                ui.text("── 详情 ──", 8, y, C_CYAN); y += 26
+                ui.text("本机 IP: %s" % (wifi.ip if connected else "---"), 8, y, C_WHITE); y += 24
+                ui.text("探测端口: %d" % PING_PORT, 8, y, C_GREY); y += 24
+                ui.text("RTT 最小: %s" % (voice.rtt_min if voice.rtt_min is not None else "---"), 8, y, C_WHITE); y += 24
+                ui.text("RTT 最大: %s" % (voice.rtt_max if voice.rtt_max is not None else "---"), 8, y, C_WHITE); y += 24
+                ui.text("PING 发/收: %d/%d" % (voice.pings_sent, voice.pongs_recv), 8, y, C_WHITE); y += 24
+                ui.text("丢 PING: %d" % max(0, voice.pings_sent - voice.pongs_recv), 8, y,
+                        C_RED if voice.pings_sent > voice.pongs_recv else C_WHITE); y += 24
+                ui.text("发送错误: %d" % voice.send_errors, 8, y, C_WHITE); y += 24
+                ui.text("块大小: %dB=32ms" % CHUNK_BYTES, 8, y, C_GREY); y += 24
+                ui.text("采样: %dHz/16bit/单声道" % SAMPLE_RATE, 8, y, C_GREY); y += 24
+                ui.text("Codec: %s" % ("OK" if codec_ok else "失败"), 8, y,
+                        C_GREEN if codec_ok else C_RED); y += 24
+                up_s = time.ticks_diff(time.ticks_ms(), BOOT_TIME) // 1000
+                ui.text("运行: %02d:%02d" % (up_s // 60, up_s % 60), 8, y, C_GREY)
+
+            # 头栏电量
+            draw_string_cn(display, "%d%%" % ui.battery_pct, 174, 10, C_YELLOW, C_BAR)
+
+        gc.collect()
+        time.sleep_ms(1)
+
 
 if __name__ == "__main__":
     main()

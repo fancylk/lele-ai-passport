@@ -34,3 +34,13 @@ WIFI_SSID    = "CMCC-Ab9h"
 WIFI_PASS    = "tvakk9k8"
 HOST_IP      = "192.168.31.102"
 UDP_PORT     = 8888
+
+# ==============================================================================
+# Voice Stream (乐乐语音桥: ES8311 麦克风常开 → UDP PCM → Mac)
+# 目标主机 = Mac, 接收器端口 9761(纯 PCM), 9762(延迟探测 PING/PONG)
+# ==============================================================================
+STREAM_IP    = "192.168.31.185"   # Mac 局域网 IP (接收器所在主机)
+STREAM_PORT  = 9761               # PCM 推流端口 (s16le 16kHz mono)
+PING_PORT    = 9762               # 延迟探测端口 (badge 发 PING, 接收器回 PONG)
+SAMPLE_RATE  = 16000              # Hz
+CHUNK_BYTES  = 1024               # 512 样本 = 32ms/包, UDP 载荷安全尺寸
