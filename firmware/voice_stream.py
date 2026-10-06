@@ -158,7 +158,7 @@ class VoiceStream:
                 bits=16,
                 format=I2S.MONO,
                 rate=SAMPLE_RATE,
-                ibuf=CHUNK_BYTES * 4,
+                ibuf=CHUNK_BYTES * 8,   # 8KB = 256ms 抗抖: UI 重画期间不丢采样
             )
             print("[+] I2S0 RX 16k/16bit/mono (BCLK=%d WS=%d DIN=%d)" % (PIN_BCLK, PIN_WS, PIN_DIN))
         except Exception as e:
@@ -191,14 +191,27 @@ class VoiceStream:
             time.sleep_ms(100)
             return 0
         if n and not self.muted:
+            ok = False
             try:
                 self.sock.sendto(memoryview(self._chunk)[:n], (STREAM_IP, STREAM_PORT))
+                ok = True
+            except OSError:
+                # ENOMEM: WiFi TX 队列瞬时满, 让一口气重试一次
+                time.sleep_ms(3)
+                try:
+                    self.sock.sendto(memoryview(self._chunk)[:n], (STREAM_IP, STREAM_PORT))
+                    ok = True
+                except OSError:
+                    pass
+            except Exception:
+                pass
+            if ok:
                 self.pkts += 1
                 self.bytes_sent += n
-            except Exception as e:
+            else:
                 self.send_errors += 1
                 if self.send_errors < 5 or self.send_errors % 100 == 0:
-                    print("[!] UDP send error:", e)
+                    print("[!] UDP send dropped (#%d)" % self.send_errors)
         self._poll_ping()
         return n
 

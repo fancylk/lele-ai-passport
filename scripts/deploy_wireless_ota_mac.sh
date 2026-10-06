@@ -17,6 +17,7 @@ FILES=(
     "wifi_manager.py"
     "st7789_direct.py"
     "chinese_font.py"
+    "font16.bin"
     "battery.py"
     "voice_stream.py"
     "main.py"

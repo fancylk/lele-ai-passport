@@ -42,6 +42,10 @@ class WiFiManager:
         self.ip = self.wlan.ifconfig()[0]
         self.is_connected = True
         print(f"[+] WiFi Connected! IP Address: {self.ip}")
+        try:
+            self.wlan.config(pm=0)  # 射频常开: 省电模式会让 UDP 发包排队→ENOMEM
+        except Exception:
+            pass
         if self.on_status_cb:
             self.on_status_cb(f"已连入 WiFi: {self.ip}")
 

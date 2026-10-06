@@ -69,12 +69,40 @@ scripts/deploy_wireless_ota_mac.sh   # WebREPL OTA 固件到工牌（默认 192.
 3. Mac: `tools/verify_blackhole.sh` → max_volume > -25dB = 音频到位
 4. 微信输入法点麦克风 → 对工牌说话 → 出中文字
 
-## 故障排查
+## 实装记录(2026-10-06, 已全部实证)
+
+1. **工牌曾被恢复出厂(原厂 C 固件, OTA v2.7.8, 8266 拒连 = 没有 WebREPL)**。
+   重刷 MicroPython 配方: `pip install esptool` →
+   `esptool --port /dev/cu.usbmodem101 erase-flash` →
+   `esptool --port … write-flash 0x0 ESP32_GENERIC_C3-…-v1.29.0.bin`
+   (官方包 machine.I2S 在位; 8MB XMC flash 直接可用; 原厂固件可随时用官方
+   网页刷机工具恢复, ai-passport.folotoy.cn/tools/web-flasher)。
+2. **WiFi 省电模式是 UDP 推流天敌**: 默认 modem-sleep 下 sendto 大量
+   `ENOMEM`(TX 队列等 DTIM 排爆), 表现 1 包/秒。**connect 后
+   `wlan.config(pm=0)` 射频常开**, 之后 29.3 包/秒稳定持续。
+3. **屏幕性能铁律(实测基准)**: 汉字绘制 8.5ms/字, 整页清除 56ms,
+   整页≈50 字 ≈500ms → 整页周期性重画会把 32ms 的音频节拍饿死。
+   对策: 整页只在启动/翻页画; 运行期每 500ms 只增量刷一行; I2S ibuf
+   8KB(=256ms) 吸收绘制期抖动。
+4. I2S 实测节拍 31.8ms/1024B = 精确 16kHz 实时; 空闲室内声
+   peak≈0.07/rms≈0.007 = ES8311+MCLK(PWM)+I2S 链全部真实有效。
+
+## 排障(按发生概率)
 
 - **屏幕 RTT --- 且 Mac 收 0 包**：WiFi 未连 / Mac IP 变了（改 config.py
   STREAM_IP）/ 接收器没跑（`voice_receiver.sh status`）
+- **发包速率掉到 1-5 包/秒**：wifi_manager 里 `pm=0` 丢了（重连后未生效）；
+  或整页重画回归（看 main.py 是否还守"增量刷行"铁律）
 - **RTT 通但 BlackHole 无声**：接收器输出设备不对（`--device "BlackHole 2ch"`），
   系统设置→声音里确认 BlackHole 存在
+- **BlackHole 有流但录出来全零**：macOS 麦克风权限——抓音设备（含 BlackHole）
+  无 TCC 授权时**不报错、只回全零**；系统设置→隐私与安全性→麦克风 给终端/
+  微信输入法开权限
+- **8266 拒绝连接**：工牌又被恢复成原厂 C 固件（串口日志是 ESP-IDF 格式+
+  lele_ota OTA 检查即证据），按上面配方重刷 MicroPython
+- **REPL 进不去（could not enter raw repl）**：老 main.py 死循环吃 stdin 吞了
+  Ctrl-C；用 `tools/serial_grab.py`（USB-JTAG 硬复位+Ctrl-C 风暴抢窗口），
+  新版 main.py 不读 stdin 无此问题
 - **有声音但识别差**：工牌离麦太远 → 详情页看 RSSI；或 PGA 不够（voice_stream
   REG16 调 0x06=36dB）
 - **UDP 丢包高（丢 PING 上涨）**：2.4G 拥挤；可把 CHUNK_BYTES 加到 1400 降包率
