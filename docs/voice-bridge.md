@@ -1,21 +1,27 @@
-# 乐乐语音桥 —— 工牌麦克风常开 → Mac 微信输入法语音输入
+# 乐乐语音桥 —— 工牌麦克风常开 → 腾讯云中转 → 微信输入法语音输入
 
 > 2026-10-06 定稿并实装。工牌彻底清零重设计：不再做导游演示，专职当
-> **语音输入音源**（常开麦克风），屏幕实时显示到主机端的延迟，便于评估链路。
+> **语音输入音源**（常开麦克风），屏幕实时显示到中转的延迟，便于评估链路。
 
-## 架构
+## 架构（v2: 腾讯云星型中转）
+
+真实场景：电脑放公司、人在家远程用——工牌与主机**不在同一局域网**，
+音频经腾讯云中转（工牌在家 Wi-Fi、Mac 在公司网络，都只出站连中转）：
 
 ```
-[工牌 ESP32-C3 + ES8311]  麦克风常开采集 16kHz/16bit/mono
-  → Wi-Fi UDP 推流 (1024B=32ms/包 → Mac:9761)
-  → Mac voice_receiver.py → BlackHole 2ch 虚拟声卡
-  → 微信输入法 Mac 版（语音输入, 麦克风选 BlackHole 2ch, 识别=腾讯云）
-  → 文字落 Mac 任意应用
+[工牌 ESP32-C3+ES8311] 常开采集 16k/16bit/mono
+  → UDP 1024B/32ms + 每10s音源握手(LELE1+token) → 中转:9761
+[中转 relay.py @124.221.187.167] (systemd lele-relay, 纯标准库)
+  → 转发给全部订阅者(每30s SUB+token 保活, 90s 超时剔除)
+[Mac tools/voice_receiver.py --relay 124.221.187.167]
+  → BlackHole 2ch → 微信输入法(腾讯云 ASR) → 出字
+未来订阅者: 盒子 InputPad(二期回推) 同协议接入即可.
 ```
 
-延迟探测旁路：工牌每秒发 `PING(seq,t)` → Mac:9762 → 回 `PONG` →
-工牌算 RTT 上屏（主页大字），另存最小/最大/丢包数（详情页）。
-Mac 侧另测**到包抖动**（每 5 秒统计行）。屏幕两页：上=状态+RTT，OK=详情。
+延迟探测：工牌每秒 PING 中转:9762 → PONG → 工牌上屏 RTT（工牌→中转这一跳）；
+Mac 侧 `--relay` 模式每 5s 也 PING，统计行显示本机→中转 RTT + 到包抖动。
+鉴权：音源握手与订阅都带 token（config.py STREAM_TOKEN = relay.py TOKEN）；
+音频包本身不带 header（中转按源地址识别，纯转发零开销）。
 
 ## 硬件事实（引脚单一事实来源 = 官方 bsp_pins.h，gitee.com/FoloToy/ai-passport）
 
@@ -52,9 +58,17 @@ REG31|=0x60 + REG32=0x00（DAC 静音——喇叭贴着麦克风，禁一切提�
 ## Mac 端（tools/）
 
 ```bash
-tools/voice_receiver.sh start        # 后台收流→BlackHole
+tools/voice_receiver.sh start        # 默认订阅腾讯中转 (VOICE_RELAY=IP 可换, 置空切 LAN 直连)
 tools/verify_blackhole.sh            # 录 BlackHole 6s 报电平（验证音频真到了）
 scripts/deploy_wireless_ota_mac.sh   # WebREPL OTA 固件到工牌（默认 192.168.31.133）
+```
+
+## 中转服务器（relay/，部署在 ssh tencent）
+
+```bash
+scp relay/relay.py tencent:/tmp/ && ssh tencent \
+  "sudo mv /tmp/relay.py /opt/lele-relay/ && sudo systemctl restart lele-relay"
+# 腾讯控制台防火墙须放行: UDP 9761 + UDP 9762 (来源 0.0.0.0/0)
 ```
 
 ## 微信输入法 Mac 版设置

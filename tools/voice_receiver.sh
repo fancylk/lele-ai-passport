@@ -7,13 +7,17 @@ PY="$DIR/.venv/bin/python"
 PIDFILE="/tmp/voice_receiver.pid"
 LOGFILE="/tmp/voice_receiver.log"
 PORT="${VOICE_PORT:-9761}"
+# 默认走腾讯中转(工牌与 Mac 不同局域网的常态); VOICE_RELAY="" 可切回 LAN 直连
+RELAY="${VOICE_RELAY:-124.221.187.167}"
+RELAY_ARG=""
+[ -n "$RELAY" ] && RELAY_ARG="--relay $RELAY"
 
 case "${1:-start}" in
   start)
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
       echo "[=] 已在运行 (pid $(cat "$PIDFILE"))"; exit 0
     fi
-    nohup "$PY" -u "$DIR/voice_receiver.py" --port "$PORT" >>"$LOGFILE" 2>&1 &
+    nohup "$PY" -u "$DIR/voice_receiver.py" --port "$PORT" $RELAY_ARG >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 1
     if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then

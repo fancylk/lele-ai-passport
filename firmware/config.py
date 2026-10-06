@@ -36,11 +36,14 @@ HOST_IP      = "192.168.31.102"
 UDP_PORT     = 8888
 
 # ==============================================================================
-# Voice Stream (乐乐语音桥: ES8311 麦克风常开 → UDP PCM → Mac)
-# 目标主机 = Mac, 接收器端口 9761(纯 PCM), 9762(延迟探测 PING/PONG)
+# Voice Stream (乐乐语音桥: ES8311 麦克风常开 → UDP PCM → 中转服务器)
+# 架构: 工牌与主机不同局域网(电脑在公司/人在家), 经腾讯云 UDP 星型中转
+#   工牌 --9761 PCM+握手--> 中转 --转发--> 全部订阅者(Mac/盒子 InputPad)
+#   工牌 --9762 PING------> 中转 --PONG--> 工牌上屏 RTT(到中转这一跳)
 # ==============================================================================
-STREAM_IP    = "192.168.31.185"   # Mac 局域网 IP (接收器所在主机)
+STREAM_IP    = "124.221.187.167"   # 中转服务器公网 IP
 STREAM_PORT  = 9761               # PCM 推流端口 (s16le 16kHz mono)
-PING_PORT    = 9762               # 延迟探测端口 (badge 发 PING, 接收器回 PONG)
+PING_PORT    = 9762               # 延迟探测端口 (badge 发 PING, 中转回 PONG)
+STREAM_TOKEN = "lele-6deb6d37"    # 音源/订阅注册口令 (与 relay/relay.py 一致)
 SAMPLE_RATE  = 16000              # Hz
 CHUNK_BYTES  = 1024               # 512 样本 = 32ms/包, UDP 载荷安全尺寸

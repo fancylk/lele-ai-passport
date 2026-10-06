@@ -12,10 +12,13 @@ import socket
 import struct
 import time
 from machine import Pin, PWM, I2S
-from config import (STREAM_IP, STREAM_PORT, PING_PORT, SAMPLE_RATE, CHUNK_BYTES)
+from config import (STREAM_IP, STREAM_PORT, PING_PORT, STREAM_TOKEN,
+                    SAMPLE_RATE, CHUNK_BYTES)
 
 ES8311_ADDR = 0x18
 MCLK_HZ = SAMPLE_RATE * 256          # 4.096MHz
+HANDSHAKE = b"LELE1" + STREAM_TOKEN.encode()   # 音源注册包 (中转识别)
+HANDSHAKE_EVERY = 300                # 每 300 包(~10s) 重发, NAT 重绑定自愈
 
 # I2S 引脚 (官方 bsp_pins.h)
 PIN_MCLK = 6
@@ -50,6 +53,7 @@ class VoiceStream:
         self._ping_seq = 0
         self._last_ping_ms = 0
         self._chunk = bytearray(CHUNK_BYTES)
+        self._pkts_since_hs = HANDSHAKE_EVERY   # 启动即握手
 
     # ------------------------------------------------------------------
     # ES8311 初始化 (录音通路)
@@ -191,6 +195,13 @@ class VoiceStream:
             time.sleep_ms(100)
             return 0
         if n and not self.muted:
+            # 定期向中转重发音源注册 (NAT 重绑定/中转重启自愈)
+            if self._pkts_since_hs >= HANDSHAKE_EVERY:
+                self._pkts_since_hs = 0
+                try:
+                    self.sock.sendto(HANDSHAKE, (STREAM_IP, STREAM_PORT))
+                except Exception:
+                    pass
             ok = False
             try:
                 self.sock.sendto(memoryview(self._chunk)[:n], (STREAM_IP, STREAM_PORT))
@@ -206,6 +217,7 @@ class VoiceStream:
             except Exception:
                 pass
             if ok:
+                self._pkts_since_hs += 1
                 self.pkts += 1
                 self.bytes_sent += n
             else:
