@@ -73,6 +73,7 @@ class VoiceStream:
         self._peer = None
         self._direct = None
         self._direct_last_ms = 0
+        self._punch_seen = 0
 
     # ------------------------------------------------------------------
     # ES8311 初始化 (录音通路)
@@ -343,10 +344,15 @@ class VoiceStream:
                     except Exception:
                         pass
             elif PUNCH and len(data) >= 4 and data[:4] == b"PNCH":
+                # 终端 PNCH 到达 = 出站方向通; 但返回路未证, 不切直连.
                 if data[4:4 + len(STREAM_TOKEN)] == STREAM_TOKEN.encode():
+                    self._punch_seen = time.ticks_ms()
+            elif PUNCH and len(data) >= 5 and data[:4] == b"PNCHA":
+                # 终端对我方 PNCH 的回执 = 双向通, 才切直连 (防 Mac 侧对称 NAT 死空气)
+                if data[5:5 + len(STREAM_TOKEN)] == STREAM_TOKEN.encode():
                     if self._direct != addr:
                         self._direct = addr
-                        print("[+] 直连建立(终端):", addr)
+                        print("[+] 直连建立(终端, ACK 确认):", addr)
                     self._direct_last_ms = time.ticks_ms()
             # 丢弃其它杂散包
 

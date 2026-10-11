@@ -52,3 +52,12 @@ CHUNK_BYTES  = 1024               # 512 样本 = 32ms/包, UDP 载荷安全尺�
 # 终端映射地址; 双方互发 PNCH 凿 NAT; 收到终端 PNCH 即直连发音频,
 # 10s 收不到 PNCH 自动回退中转. False = 永远走中转.
 PUNCH        = True
+
+# ==============================================================================
+# 多应用 + OTA (§六十六): 启动器读 /app.txt 决定应用; OTA 走腾讯 nginx HTTP
+# (scripts/ota_publish.sh 发布 manifest+文件到 /var/www/html/lele-ota/)
+# ==============================================================================
+APP_DEFAULT  = "voice_bridge"          # 无 /app.txt 时的默认应用
+OTA_HOST     = "124.221.187.167"
+OTA_PORT     = 8090
+OTA_PATH     = "/lele-ota/"

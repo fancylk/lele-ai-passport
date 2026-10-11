@@ -191,3 +191,58 @@ scp relay/relay.py tencent:/tmp/ && ssh tencent \
 识别文字 UDP 回推盒子 192.168.31.103 的 InputPad（com.taoge.inputpad 剪贴板桥）
 → RDP 会话 Ctrl+V 粘贴（Windows App 剪贴板重定向）。Mac 侧需一个抓上屏文字的
 辅助器（辅助功能 API 或手动选中复制），InputPad v2 加 UDP 监听。
+
+## 多应用 + OTA + 打洞 ACK(§六十六, 2026-10-11 晚, NAS USB 真机调试)
+
+应"恢复多应用 + OTA 升级"要求重开发;远程麦克风降级为其中一个应用。
+
+### 多应用框架
+
+```
+boot.py(WebREPL + OTA 回滚守卫) → main.py 启动器:
+  开机画面 3s: 任意键 → 菜单; 否则启动 /app.txt 里的应用(默认 voice_bridge)
+应用注册表 apps/registry.py; 菜单 apps/menu.py(UP/DOWN 选 OK 确认);
+应用内约定: 长按 OK 1s → 写 /menu.flag 重启回菜单。
+apps/: voice_bridge(远程麦克风, §六十四全功能) / guide(乐乐导游, MiMo TTS 桥不在=文字降级)
+       / answer(答案之书 200 签文, 自 ESP-IDF demo_answer.c 移植) / catch(接球, MicroPython 重写)
+应用崩溃由启动器兜底(显示错误 3s 回菜单), 永不变砖。
+```
+
+### OTA 升级(设备自动)
+
+- 服务端: 腾讯 nginx 8090 `/var/www/fw/lele-ota/`(fwserver 站点, 免防火墙改动),
+  `scripts/ota_publish.sh` 发布 manifest(crc32)+21 个固件文件, 版本号自动 +1。
+- 设备: 菜单"OTA 检查更新" → WiFi → `ota.py` 原生 socket HTTP 拉 manifest →
+  逐文件 crc32 比对 → 下载到 /otastage(流式写盘, 282KB 字库不进堆) → 校验 →
+  落 /ota.pending → /backup 备份 → 原地替换 → /installed.json → 重启。
+- **中断安全**: 升级中途断电 → boot.py 守卫从 /backup 还原 → 永远可启动。
+- 真机实测(v5): WiFi → 检查 → 21/21 下载校验 → 应用 → 重启 → installed.json v5 ✓。
+
+### 打洞协议升级: PNCH → PNCHA 双向确认
+
+v6 前"收到终端 PNCH 即切直连"有死空气风险: Mac 侧若是对称/受限 NAT,
+工牌的音频回不来, 而 Mac 的 PNCH 每秒照到 → 10s 回退永不触发。
+v7 起: 工牌收到 PNCH 只记"半通", **必须再收到终端的 PNCHA 回执(= 我方音频
+能到达终端的铁证)才切直连**; 否则永远安全留在中转。10s 无 PNCHA 回退不变。
+实测: 工牌 PNCH 穿透两侧 NAT 到达 Mac 守护 → ACK 回执 → 直连建立 ✓。
+
+### 部署通道(三选一)
+
+1. **OTA 自升级**(日常): 设备菜单 → OTA 检查更新;
+2. **WebREPL 无线**: `scripts/deploy_wireless_ota_mac.sh`(工牌与 Mac 同网);
+3. **USB 串口**: `scripts/deploy_serial_nas.sh`(工牌插 NAS/任何 Linux 的 USB,
+   首次自动建 venv 装 mpremote, 推 21 文件+建目录+重启)——本节即经飞牛 NAS 真机调试落地。
+
+### 真机调试踩坑(NAS 串口, 复写前必读)
+
+1. **MicroPython 目录会遮蔽同名模块**: 设备上有 `/ota` 目录时 `import ota`
+   得到空命名空间包(无属性) → 暂存目录改名 `/otastage`。
+2. `__import__("apps.x")` 返回**父包**, 子模块要从 `sys.modules` 取。
+3. **ESP32-C3 USB-SERIAL-JTAG 复位后前 2s 的输出无法被迟到的读端捕获**,
+   被动抓启动日志基本是空的——改用 REPL exec 断言(sys.modules / 中转 STATUS /
+   文件内容)替代日志观察; mpremote exec 打断运行中的应用会软重启(sys.modules 清空)。
+4. `machine.reset()` 经 mpremote exec **必然超时**(复位杀死 raw REPL, 等不到
+   回包)——复位实际已生效, 调用方要容忍 TimeoutExpired。
+5. `pkill -f mpremote` 会匹配到自身 ssh 命令行自杀; 杀残留进程用 lsof 定位 PID。
+6. `apps/answer.py` 的 C_BAR 类疏漏用 `py_compile` 查不出(定义存在即可),
+   要靠设备端真跑——四个应用各真机 exec 一遍是最低验收线。
