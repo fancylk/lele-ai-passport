@@ -72,7 +72,7 @@ pub fn run(cfg: &Config, mut feeder: Feeder, stats: Arc<Stats>, trigger: Arc<Tri
     let mut buf = [0u8; 4096];
     loop {
         match sock.recv_from(&mut buf) {
-            Ok((n, addr)) => handle(&buf[..n], addr, &cfg.relay.token, cfg.audio.source_rate,
+            Ok((n, addr)) => handle(&buf[..n], addr, &sock, &cfg.relay.token, cfg.audio.source_rate,
                                     &mut feeder, &trigger, &stats, &peer_cell, &direct_cell),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => {
@@ -84,8 +84,8 @@ pub fn run(cfg: &Config, mut feeder: Feeder, stats: Arc<Stats>, trigger: Arc<Tri
 }
 
 fn handle(
-    d: &[u8], addr: std::net::SocketAddr, token: &str, src_rate: u32, feeder: &mut Feeder,
-    trigger: &Arc<Trigger>, stats: &Arc<Stats>,
+    d: &[u8], addr: std::net::SocketAddr, sock: &Arc<UdpSocket>, token: &str, src_rate: u32,
+    feeder: &mut Feeder, trigger: &Arc<Trigger>, stats: &Arc<Stats>,
     peer_cell: &Arc<Mutex<Option<std::net::SocketAddr>>>, direct_cell: &Arc<Mutex<Option<std::net::SocketAddr>>>,
 ) {
     if d.starts_with(b"PONG") {
@@ -108,11 +108,16 @@ fn handle(
         }
         return;
     }
-    // 打洞: 对端 PNCH 到达 = 直连通路已打通 (音频本就来自任意地址, 无需切换)
+    // 打洞: 工牌 PNCH 到达 = 它到我们通; 回 PNCHA 作双向确认 (工牌凭 ACK 才切直连)
     if d.starts_with(b"PNCH") && d.len() > 4 && d[4..].starts_with(token.as_bytes()) {
+        {
+            let mut a = b"PNCHA".to_vec();
+            a.extend_from_slice(token.as_bytes());
+            let _ = sock.send_to(&a, addr);
+        }
         let mut cell = direct_cell.lock().unwrap();
         if *cell != Some(addr) {
-            crate::logi!("[打洞] 直连已建立: {addr} (音频端到端, 不再经中转)");
+            crate::logi!("[打洞] 工牌直连探测到达: {addr} (已回 ACK)");
             *cell = Some(addr);
         }
         return;
