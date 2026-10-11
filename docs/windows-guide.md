@@ -1,16 +1,18 @@
 # Windows 端配置与开发指南（乐乐语音桥）
 
 > 适用场景：**电脑放公司（或家里另一台 Windows 机器），想用工牌做语音输入**。
-> 工牌端零改动——它常开推流到腾讯中转；Windows 这边只需「收流 → 虚拟声卡 → 微信输入法」。
+> 工牌端零改动——它待机省电、按键才推流(§六十四)；Windows 这边只需「收流 → 虚拟声卡 → 微信输入法」，
+> 并可选启用「工牌按键 → 合成微信输入法语音快捷键」控制通道。
 > 本文档同时是 **空对话/新会话的开工入口**：新 Agent 会话直接从「五、开发入口」开始。
 
 ## 〇、30 秒总览
 
 ```
-[工牌 ESP32-C3] 麦克风常开, 16k/16bit/mono PCM
-  → UDP 1024B/32ms → 腾讯中转 124.221.187.167:9761 (已部署, systemd 自启)
+[工牌 ESP32-C3] 待机(静音, 握手照发) —按键→ 广播控制帧(DICT*/PTTD*) + 16k/16bit/mono PCM
+  → UDP → 腾讯中转 124.221.187.167:9761 (已部署, systemd 自启, 控制帧透明转发)
   → 中转转发给全部订阅者
 [Windows 本脚本 tools/start_receiver.bat]  ← 你要跑的东西
+  → 控制帧 → 合成微信输入法语音快捷键(SendInput, 需先改绑快捷键, 见 §一.5)
   → VB-Cable 虚拟声卡
   → 微信输入法(语音输入麦克风选 CABLE Input) → 腾讯云识别 → 出字
 ```
@@ -44,12 +46,31 @@ https://www.python.org/downloads/windows/ 下载安装，**务必勾选 "Add to 
 [  30s] 收 875 包 875KB (232kbps) 中转RTT≈56ms 到包抖动±10.1ms 缓冲0KB
 ```
 
-注意：**工牌上电后才会开始推流**（屏幕显示「● 推流中 → Mac」字样即在工作）。
+注意：**工牌上电后处于待机(静音)不推流**，按一下工牌上键(语音开关)才开始推流
+（屏幕显示「🎙 语音输入中」即在工作）。
 
 ### 4. 装/配微信输入法
 1. https://z.weixin.qq.com 下载安装，扫码登录
 2. 设置 → 语音输入 → **麦克风设备选 `CABLE Input (VB-Audio Virtual Cable)`**
 3. Windows 设置 → 隐私和安全性 → 麦克风 → **允许桌面应用访问麦克风**（微信输入法要能"听"虚拟声卡）
+
+### 5. 启用工牌按键控制语音（可选，§六十四）
+
+Mac 上合成 Fn 可行；**Windows 没有可合成的 Fn 虚拟键**，所以要先在微信输入法
+设置里把两个语音快捷键**改绑成普通组合键**（建议：按住说话=``Ctrl+` ``，
+长输入=F9，任选不冲突的），然后给接收器传同样的键（VK 码，逗号分隔）：
+
+```
+python voice_receiver.py --relay 124.221.187.167 --device "CABLE Input" ^
+    --voice-ptt-key 0x09 --voice-mods ctrl --voice-toggle-key 0x78
+```
+
+（`0x09`=Tab 作按住说话键+Ctrl 修饰、`0x78`=F9 长输入；按键名支持
+ctrl/alt/shift/space/f1-f12 或数字 VK。自启注册表项同样追加这几个参数。
+改绑前先在微信输入法设置确认其默认快捷键是什么，以实际为准。）
+
+**注意**：Windows 侧注入(SendInput)尚未实测——启用时先在记事本里按一次
+工牌上键，看长输入面板是否弹出；不弹检查微信输入法实际改绑的键与参数是否一致。
 
 ### 5. 验证端到端
 随便开个输入框 → 点微信输入法的麦克风按钮 → **对工牌说话** → 出中文字。
@@ -94,10 +115,12 @@ https://www.python.org/downloads/windows/ 下载安装，**务必勾选 "Add to 
 1. <仓库路径>/docs/windows-guide.md  （Windows 配置+开发指南，本文件的同步版）
 2. <仓库路径>/docs/voice-bridge.md    （全案架构与固件细节）
 已就绪事实（勿重新考证）：
-- 腾讯中转 124.221.187.167，UDP 9761(音频)/9762(探测)，token=lele-6deb6d37
-- 工牌(ESP32-C3, MicroPython)常开推流 16k/16bit/mono，固件在 firmware/
-- 接收器 tools/voice_receiver.py 双模式(--relay 订阅/LAN 直连)，Windows 用 tools/start_receiver.bat 启动
-- Mac 端全链已验证可用；中转服务 systemd 单元名 lele-relay（ssh tencent 管理）
+- 腾讯中转 124.221.187.167，UDP 9761(音频+控制帧)/9762(探测)，token=lele-6deb6d37
+- 工牌(ESP32-C3, MicroPython)待机省电、按键推流：上=语音开关(DICT1/DICT0) 下=按住说话(PTTD1/PTTD0)，固件在 firmware/
+- 接收器 tools/voice_receiver.py 双模式(--relay 订阅/LAN 直连)，识别控制帧后合成微信输入法语音快捷键
+  （Mac 默认 Fn/Fn+空格 已实测一致；Windows 需微信输入法改绑普通组合键后 --voice-ptt-key/--voice-toggle-key/--voice-mods 传入）
+- Windows 用 tools/start_receiver.bat 启动；开机自启=HKCU Run 键（追加 --voice-* 参数即启用控制通道）
+- Mac 端全链已验证可用(§六十四)；中转服务 systemd 单元名 lele-relay（ssh tencent 管理）
 本次任务：<在这里写本次要做什么>
 ```
 
@@ -108,3 +131,24 @@ tools/voice_receiver.sh start        # 默认已订阅同一中转
 tools/verify_blackhole.sh            # 验证虚拟声卡电平
 scripts/deploy_wireless_ota_mac.sh   # 工牌 OTA（WebREPL，默认 192.168.31.133）
 ```
+
+## 七、Windows 实装记录（2026-10-07，tyz86 台式机，Windows 11 x64）
+
+本节是首台 Windows 实机的踩坑实录，第二台机器可直接照抄。
+
+**已验证可行：**
+
+- Python 3.12 + `pip install sounddevice`（清华镜像秒装）
+- 微信输入法安装器支持 `/S` 静默安装（`WeTypeSetup_3.0.0.17_3.exe /S`），装完服务与进程自启，无需向导点击
+- 麦克风隐私：`HKCU\...\CapabilityAccessManager\ConsentStore\microphone`（及 `NonPackaged` 子键）`Value=Allow` 即可放行桌面应用
+- 接收器开机自启：`HKCU\...\Run` 加 `cmd /c start /min "" python voice_receiver.py --relay 124.221.187.167 --device "CABLE Input"`
+- 本机到中转链路：232kbps 稳定收流，RTT 15~60ms，到包抖动 ±7~10ms，可满足语音识别
+
+**踩坑：**
+
+1. **VB-Cable 装完端点立即可用，但会"迟发失效"**：安装后 `CABLE Input/Output` 端点马上出现、能开流、环路测试通过（-12dBFS）；但运行约 10 分钟后 Windows 重枚举音频端点，运行中的流被拔（`MME error 6: There is no driver installed`），之后端点从 WASAPI/MME 消失，必须**重启电脑**才恢复。这正是官方 readme 建议重启的原因——装完驱动别拖，直接重启。
+2. 端点失效期间接收器会崩溃退出 → 已加固（voice_receiver.py：按设备名每次重扫、限频重开、设备不存在进入等待模式；**绝不回落默认扬声器**，防止公司场景语音外放）。重启后由开机自启拉起，自动连上端点。
+3. 微信输入法语音输入的麦克风设备在设置 UI 里选择（MMKV 二进制配置无法安全预写），选 **CABLE Output (VB-Audio Virtual Cable)**（录制端，即虚拟声卡的"另一端"）。
+
+**第二台机器最小步骤**：装 Python+sounddevice → 装 VB-Cable（管理员）→ **重启** → 装 WeType 并扫码登录 → 微信输入法语音麦克风选 CABLE Output → 跑接收器 → 对工牌说话出字。
+

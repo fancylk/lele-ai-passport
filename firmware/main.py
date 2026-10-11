@@ -1,7 +1,10 @@
 """
-乐乐语音桥 (Lele Voice Bridge) —— 常开麦克风 → UDP 推流 → Mac/BlackHole.
+乐乐语音桥 (Lele Voice Bridge) —— 待机麦克风 → 按键控制 → UDP 推流 → PC 虚拟声卡.
 
-按键: 上=静音切换  下=立即测延迟  OK=主页/详情翻页
+按键 (2026-10-11 §六十四, 语音输入控制):
+  上=语音输入开关(长输入会话, 再按结束)  下=按住说话(松开上屏)  OK=翻页, 长按OK=测延迟
+  语音关 = 广播控制帧 + 1.5s 收尾宽限后静音省电; 开机即待机(静音), 握手照发保中转注册.
+
 屏幕实时显示到主机端的延迟(RTT)/码率/丢包/信号, 用于评估链路质量.
 
 性能铁律(实测): 8.5ms/汉字 + 56ms/整页清除 → 整页重画≈500ms 会饿死 32ms 的
@@ -86,14 +89,14 @@ class BridgeUI:
         self.d.fill_rect(0, 0, 240, 36, C_BAR)
         draw_string_cn(self.d, "乐乐语音桥", 8, 10, C_WHITE, C_BAR)
         self.d.fill_rect(0, 296, 240, 24, C_BAR)
-        draw_string_cn(self.d, "上静音 下测延 OK翻页", 8, 301, C_GREY, C_BAR)
+        draw_string_cn(self.d, "上语音 下说话 长按OK测延", 8, 301, C_GREY, C_BAR)
 
-    def full_render(self, connected, stream_ok, voice_muted, rssi):
+    def full_render(self, connected, stream_ok, voice, rssi):
         """整页重画 (只在启动/翻页时调用, ≈500ms)."""
         self.frame()
         if self.page == 0:
-            self.line(Y_STATUS, self._status_text(connected, stream_ok, voice_muted),
-                      self._status_color(connected, stream_ok, voice_muted))
+            self.line(Y_STATUS, self._status_text(connected, stream_ok, voice),
+                      self._status_color(connected, stream_ok, voice))
             self.line(Y_RTT, "延迟 RTT: ---", C_GREY)
             self.line(Y_HOST, "主机 %s:%d" % (STREAM_IP, STREAM_PORT), C_GREY)
             self.line(Y_RATE, "码率: %dkbps" % (SAMPLE_RATE * 16 // 1024), C_WHITE)
@@ -104,19 +107,23 @@ class BridgeUI:
                 self.line(Y_DETAIL0 + i * 24, t, C_WHITE)
         draw_string_cn(self.d, "%d%%" % self.battery_pct, 174, 10, C_YELLOW, C_BAR)
 
-    def _status_text(self, connected, stream_ok, muted):
+    def _status_text(self, connected, stream_ok, v):
         if not connected:
             return "✗ WiFi 未连接"
         if not stream_ok:
             return "✗ 推流未启动"
-        if muted:
-            return "⏸ 已静音 (暂停发送)"
-        return "● 推流中 → Mac"
+        if v.ptt_active:
+            return "🎙 按住说话..."
+        if v.dict_on:
+            return "🎙 语音输入中"
+        if v.muted:
+            return "⏸ 待机 (上键开语音)"
+        return "● 推流中"
 
-    def _status_color(self, connected, stream_ok, muted):
+    def _status_color(self, connected, stream_ok, v):
         if not connected or not stream_ok:
             return C_RED
-        if muted:
+        if v.muted and not v.ptt_active and not v.dict_on:
             return C_YELLOW
         return C_GREEN
 
@@ -179,29 +186,49 @@ def main():
             ui.battery_pct, _ = battery.get_info()
         except Exception:
             pass
-        ui.full_render(connected, stream_ok, voice.muted, None)
+        ui.full_render(connected, stream_ok, voice, None)
 
     last_btn = None
     last_btn_time = 0
+    ok_down_ms = None        # OK 按下时刻: 点按=翻页, 长按>600ms=测延迟
+    ok_long_fired = False
     tick = 0
     last_ui = time.ticks_ms()
 
     while True:
         now = time.ticks_ms()
         btn = read_btn(adc)
-        if btn and btn != last_btn and time.ticks_diff(now, last_btn_time) > 200:
+        # 按键边沿检测: 未过防抖门的边沿不更新 last_btn → 事件延迟而非丢失
+        # (PTT 快速点抬的松开边沿不会被吞, 最多晚 ~120ms, 收尾宽限可吸收)
+        if btn != last_btn and time.ticks_diff(now, last_btn_time) > 120:
             last_btn_time = now
-            if btn == "UP" and stream_ok:
-                voice.set_muted(not voice.muted)
-                ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice.muted),
-                        ui._status_color(connected, stream_ok, voice.muted))
-            elif btn == "DOWN" and stream_ok:
-                voice._last_ping_ms = 0
-                voice._poll_ping()
-            elif btn == "OK":
-                ui.page = 1 - ui.page
-                ui.full_render(connected, stream_ok, voice.muted, None)
-        last_btn = btn
+            if last_btn == "DOWN" and btn != "DOWN" and stream_ok:
+                voice.set_ptt(False)     # 抬起 (释放弹跳经过 OK 电压段也按抬起处理)
+                ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice),
+                        ui._status_color(connected, stream_ok, voice))
+            elif btn == "DOWN" and stream_ok and last_btn != "DOWN":
+                voice.set_ptt(True)
+                ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice),
+                        ui._status_color(connected, stream_ok, voice))
+            elif btn == "UP" and stream_ok and last_btn != "DOWN":
+                voice.set_dict_mode(not voice.dict_on)
+                ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice),
+                        ui._status_color(connected, stream_ok, voice))
+            elif btn == "OK" and last_btn != "DOWN":
+                ok_down_ms = now
+                ok_long_fired = False
+            elif btn is None and last_btn == "OK":
+                if ok_down_ms is not None and not ok_long_fired:
+                    ui.page = 1 - ui.page
+                    ui.full_render(connected, stream_ok, voice, None)
+                ok_down_ms = None
+            last_btn = btn
+        # OK 长按 ≥600ms → 立即测一次延迟 (原下键功能)
+        if btn == "OK" and ok_down_ms is not None and not ok_long_fired \
+                and stream_ok and time.ticks_diff(now, ok_down_ms) > 600:
+            ok_long_fired = True
+            voice._last_ping_ms = 0
+            voice._poll_ping()
 
         if stream_ok:
             voice.poll()                 # 32ms 节拍, 音频优先
@@ -212,7 +239,7 @@ def main():
             try:
                 wifi.connect(timeout=4)
                 connected = wifi.is_connected
-                ui.full_render(connected, stream_ok, voice.muted, None)
+                ui.full_render(connected, stream_ok, voice, None)
             except Exception:
                 pass
 
@@ -245,6 +272,9 @@ def main():
                     except Exception:
                         pass
                     draw_string_cn(display, "%d%%" % ui.battery_pct, 174, 10, C_YELLOW, C_BAR)
+                    # 状态行低频补偿刷新: 收尾宽限到期转待机/远端状态变化能上屏
+                    ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice),
+                            ui._status_color(connected, stream_ok, voice))
             else:
                 # 详情页: 每 tick 刷两行 (RTT 极值/统计)
                 if tick == 0:

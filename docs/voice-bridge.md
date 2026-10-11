@@ -1,20 +1,22 @@
-# 乐乐语音桥 —— 工牌麦克风常开 → 腾讯云中转 → 微信输入法语音输入
+# 乐乐语音桥 —— 工牌按键控制 → 腾讯云中转 → 微信输入法语音输入
 
 > 2026-10-06 定稿并实装。工牌彻底清零重设计：不再做导游演示，专职当
-> **语音输入音源**（常开麦克风），屏幕实时显示到中转的延迟，便于评估链路。
+> **语音输入音源**（待机麦克风，按键控制），屏幕实时显示到中转的延迟，便于评估链路。
+> 2026-10-11 §六十四升级：**工牌按键直接控制微信输入法语音输入**，不再需要碰键盘快捷键。
 
-## 架构（v2: 腾讯云星型中转）
+## 架构（v2: 腾讯云星型中转 + v3: 按键控制通道）
 
 真实场景：电脑放公司、人在家远程用——工牌与主机**不在同一局域网**，
 音频经腾讯云中转（工牌在家 Wi-Fi、Mac 在公司网络，都只出站连中转）：
 
 ```
-[工牌 ESP32-C3+ES8311] 常开采集 16k/16bit/mono
-  → UDP 1024B/32ms + 每10s音源握手(LELE1+token) → 中转:9761
+[工牌 ESP32-C3+ES8311] 待机(静音省电, 握手照发) → 按键广播控制帧(DICT*/PTTD*) → 中转:9761
+  语音开/PTT按下 → 解除静音, 16k/16bit/mono 1024B/32ms UDP 推流
 [中转 relay.py @124.221.187.167] (systemd lele-relay, 纯标准库)
-  → 转发给全部订阅者(每30s SUB+token 保活, 90s 超时剔除)
+  → 已注册音源的未知前缀包原样转发(零改动透明支持控制帧), 全部订阅者(90s 超时剔除)
 [Mac tools/voice_receiver.py --relay 124.221.187.167]
-  → BlackHole 2ch → 微信输入法(腾讯云 ASR) → 出字
+  → 控制帧 → 后台线程合成微信输入法语音快捷键(Fn/Fn+空格, ctypes CoreGraphics)
+  → 音频 → BlackHole 2ch → 微信输入法(腾讯云 ASR) → 出字
 未来订阅者: 盒子 InputPad(二期回推) 同协议接入即可.
 ```
 
@@ -22,6 +24,10 @@
 Mac 侧 `--relay` 模式每 5s 也 PING，统计行显示本机→中转 RTT + 到包抖动。
 鉴权：音源握手与订阅都带 token（config.py STREAM_TOKEN = relay.py TOKEN）；
 音频包本身不带 header（中转按源地址识别，纯转发零开销）。
+
+**控制帧要点**：握手(LELE1)纯计时每 10s 发送、**静音期间照发**——中转音源注册
+60s 过期，停发超时后控制帧会被当杂散包丢弃（这是设计要害，别回退）。
+每个控制事件连发 3 遍(间隔 30ms)抗 UDP 丢包，接收端 300ms 去重。
 
 ## 硬件事实（引脚单一事实来源 = 官方 bsp_pins.h，gitee.com/FoloToy/ai-passport）
 
@@ -48,19 +54,52 @@ REG31|=0x60 + REG32=0x00（DAC 静音——喇叭贴着麦克风，禁一切提�
 
 | 文件 | 作用 |
 |---|---|
-| `main.py` | 语音桥应用：按键 上=静音切换 下=立即测延迟 OK=翻页 |
-| `voice_stream.py` | ES8311 init + MCLK PWM + I2S RX + UDP 推流 + PING/PONG |
-| `config.py` | `STREAM_IP`(Mac=192.168.31.185)/9761/9762/16k/CHUNK |
+| `main.py` | 语音桥应用：上=语音开关 下=按住说话 OK=翻页/长按测延 |
+| `voice_stream.py` | ES8311 init + MCLK PWM + I2S RX + UDP 推流 + 控制帧 + PING/PONG |
+| `config.py` | `STREAM_IP`(中转)/9761/9762/16k/CHUNK |
 | 其余 | wifi_manager / st7789_direct / chinese_font / battery 沿用 |
 
 旧导游版（三步状态机）已整体移除，回滚看 git 历史。
+
+## 语音输入控制通道（§六十四, 2026-10-11）
+
+工牌按键 → 控制帧 → 接收器合成微信输入法语音快捷键，全程不碰键盘：
+
+| 工牌按键 | 动作 | 控制帧 | 接收器合成 |
+|---|---|---|---|
+| 上键按一下 | 开语音(长输入会话) | `DICT1+token` | Fn+空格 轻击 |
+| 上键再按一下 | 结束语音上屏 | `DICT0+token` | Fn+空格 轻击(再翻一次) |
+| 下键按住 | 按住说话(PTT) | `PTTD1+token` | Fn 按下 |
+| 下键松开 | 识别结束上屏 | `PTTD0+token` | Fn 抬起 |
+| OK 点按 | 翻页 | — | — |
+| OK 长按>600ms | 立即测延迟 | — | — |
+
+- 静音联动：语音开=解除静音推流；语音关/PTT 松开=广播后 **1.5s 收尾宽限再静音**
+  （留识别端收尾）。开机即待机（静音省电），握手照发。
+- toggle 语义限制：微信输入法无会话状态查询接口，DICT1/DICT0 都合成一次
+  Fn+空格（=每按一次翻转一次）。若长输入面板已被它自己结束（超时/点了完成），
+  工牌再按一次"关"会把它打开——多按一次即自愈，面板状态屏上可见。
+  PTT 无状态，最可靠。
+- 微信输入法 Mac 版快捷键实测（其设置 MMKV `wetype.settings`）：
+  `voicePTTShortcut_keyCodes=[63]`、`voiceToggleShortcut_keyCodes=[63,49]`
+  （63=Fn/Globe，49=空格），接收器默认值与此一致；在微信输入法设置里改绑后
+  用 `--voice-ptt-key/--voice-toggle-key/--voice-mods` 传新键。
+- **Mac 注入需辅助功能权限**：系统设置→隐私与安全性→辅助功能→勾选启动
+  voice_receiver 的终端（nohup 从哪个终端启动就归谁）。授权缺失时合成事件被
+  系统静默丢弃（`AXIsProcessTrusted()` 可能为 True 但照样丢——以面板为准）。
+- 自检：`python3 tools/spike_weetype_hotkey.py toggle|ptt`（在同一个终端环境跑）。
+- Windows：无 Fn 虚拟键，微信输入法 Windows 版两快捷键改绑普通组合键后
+  `--voice-ptt-key space --voice-mods ctrl` 这样传入；注入走 ctypes SendInput。
+- 中转零改动：已注册音源的未知前缀包原样转发（relay.py 音频分支），
+  已对真实中转实测控制帧到端。
 
 ## Mac 端（tools/）
 
 ```bash
 tools/voice_receiver.sh start        # 默认订阅腾讯中转 (VOICE_RELAY=IP 可换, 置空切 LAN 直连)
 tools/verify_blackhole.sh            # 录 BlackHole 6s 报电平（验证音频真到了）
-scripts/deploy_wireless_ota_mac.sh   # WebREPL OTA 固件到工牌（默认 192.168.31.133）
+tools/spike_weetype_hotkey.py        # 自检合成快捷键（辅助功能授权 + 微信输入法响应）
+scripts/deploy_wireless_ota_mac.sh   # WebREPL OTA 固件到工牌（默认 192.168.31.133, 工牌回家局域网时推）
 ```
 
 ## 中转服务器（relay/，部署在 ssh tencent）
@@ -74,14 +113,18 @@ scp relay/relay.py tencent:/tmp/ && ssh tencent \
 ## 微信输入法 Mac 版设置
 
 官网 z.weixin.qq.com 下载 → 登录 → 设置 → 语音输入 → 麦克风设备选
-**BlackHole 2ch**。之后点它的麦克风按钮（或快捷键），对工牌说话即出字。
+**BlackHole 2ch**。语音触发快捷键默认 Fn(按住说话)/Fn+空格(长输入)，
+现在由工牌按键经接收器合成，无需碰键盘。
 
 ## 端到端验证步骤
 
-1. Mac: `tools/voice_receiver.sh start`
-2. 工牌上电（约 5 秒后开始推流，屏幕显示 ● 推流中 + RTT）
-3. Mac: `tools/verify_blackhole.sh` → max_volume > -25dB = 音频到位
-4. 微信输入法点麦克风 → 对工牌说话 → 出中文字
+1. Mac: 授辅助功能权限后 `tools/voice_receiver.sh start`（日志应出现"语音触发就绪"）
+2. 工牌上电 → 屏显"⏸ 待机"
+3. 按一下上键 → 屏显"🎙 语音输入中"，Mac 日志出现"长输入会话开"，
+   微信输入法长输入面板弹出 → 对工牌说话 → 文字实时上屏
+4. 再按一下上键 → 会话结束文字上屏，1.5s 后工牌回"⏸ 待机"
+5. 按住下键说话 → 松开 → 文字上屏（PTT）
+6. 按上键后 `tools/verify_blackhole.sh` → max_volume > -25dB = 音频到位
 
 ## 实装记录(2026-10-06, 已全部实证)
 
@@ -101,6 +144,24 @@ scp relay/relay.py tencent:/tmp/ && ssh tencent \
 4. I2S 实测节拍 31.8ms/1024B = 精确 16kHz 实时; 空闲室内声
    peak≈0.07/rms≈0.007 = ES8311+MCLK(PWM)+I2S 链全部真实有效。
 
+## 实装记录(2026-10-11, §六十四 语音控制通道)
+
+1. **微信输入法快捷键反推**: 其设置存于 `~/Library/Application Support/WeType/
+   mmkv/wetype.settings`(MMKV, key 明文), 实测 `voicePTTShortcut_keyCodes=[63]`/
+   `voiceToggleShortcut_keyCodes=[63,49]`/`*_modifiers=0` —— PTT=Fn 按住,
+   长输入=Fn+空格, 都是通用 keyCodes 存储 = 设置界面可改绑(= 注入失效时的兜底)。
+2. **合成事件上下文要害**: CGEventPost 是否生效取决于**宿主进程的辅助功能授权**。
+   实测 ZCode 后台守护(zcode-cli)的子进程里 AXIsProcessTrusted() 返回 True 但
+   合成事件仍被静默丢弃(合成 ESC 连崩溃对话框都关不掉); osascript→System Events
+   同样无效。结论: 接收器必须从**用户 Terminal** 启动(nohup 继承 Terminal 归属),
+   给 Terminal 勾辅助功能, 用 spike 工具在 Terminal 里自检。
+3. **注入从沙箱/无授权进程丢事件不报错** —— 排障时别看报错, 看面板有没有弹。
+4. 控制帧经真实中转透明转发实测到端(模拟音源注册后发 DICT*/PTTD*, 订阅端
+   全部收到并触发); 中转源注册"新顶旧"语义: 测试注册会短暂顶掉工牌,
+   工牌 10s 握手自动抢回, 自愈无残留。
+5. 接收器冒烟: DICT1 连发 3 遍正确去重为 1 次触发; LELE1 握手帧不再喂声卡
+   (LAN 直连模式的历史小 bug 顺带修复); 假音频正常直通。
+
 ## 排障(按发生概率)
 
 - **屏幕 RTT --- 且 Mac 收 0 包**：WiFi 未连 / Mac IP 变了（改 config.py
@@ -119,6 +180,10 @@ scp relay/relay.py tencent:/tmp/ && ssh tencent \
   新版 main.py 不读 stdin 无此问题
 - **有声音但识别差**：工牌离麦太远 → 详情页看 RSSI；或 PGA 不够（voice_stream
   REG16 调 0x06=36dB）
+- **按工牌键微信输入法没反应**：① 接收器日志有没有 `[🎙]` 行——没有 = 控制帧没到
+  （工牌还是旧固件未 OTA / 中转注册过期看"握手静音照发"是否还在）；有 `[🎙]` 行
+  但面板不弹 = 合成事件被丢弃（辅助功能没授给启动接收器的终端）或快捷键被改绑
+  （微信输入法设置里看实际绑定，用 --voice-* 对齐）；② 快捷键改绑兜底见上节
 - **UDP 丢包高（丢 PING 上涨）**：2.4G 拥挤；可把 CHUNK_BYTES 加到 1400 降包率
 
 ## 二期（未做）

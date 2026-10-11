@@ -18,7 +18,18 @@ from config import (STREAM_IP, STREAM_PORT, PING_PORT, STREAM_TOKEN,
 ES8311_ADDR = 0x18
 MCLK_HZ = SAMPLE_RATE * 256          # 4.096MHz
 HANDSHAKE = b"LELE1" + STREAM_TOKEN.encode()   # 音源注册包 (中转识别)
-HANDSHAKE_EVERY = 300                # 每 300 包(~10s) 重发, NAT 重绑定自愈
+HANDSHAKE_EVERY_MS = 10000           # 握手纯计时, 静音期间也发: 中转音源注册 60s 过期,
+                                     # 停发超时后控制帧会被当杂散包丢弃, 语音开关失灵
+
+# 语音输入控制帧 (2026-10-11 §六十四): 接收器识别后合成微信输入法语音快捷键.
+# 中转对已注册音源的未知前缀包原样转发(relay.py 音频分支), 无需改中转.
+CTRL_DICT_ON  = b"DICT1" + STREAM_TOKEN.encode()   # 上键: 长输入会话开
+CTRL_DICT_OFF = b"DICT0" + STREAM_TOKEN.encode()   # 上键: 长输入会话关
+CTRL_PTT_DOWN = b"PTTD1" + STREAM_TOKEN.encode()   # 下键: 按住说话 按下
+CTRL_PTT_UP   = b"PTTD0" + STREAM_TOKEN.encode()   # 下键: 按住说话 抬起
+CTRL_RETRY    = 3                    # 每事件连发 3 遍抗 UDP 丢包 (接收端 300ms 去重)
+CTRL_GAP_MS   = 30
+MUTE_GRACE_MS = 1500                 # 语音关/PTT 抬起后延迟静音, 留识别端收尾音频
 
 # I2S 引脚 (官方 bsp_pins.h)
 PIN_MCLK = 6
@@ -39,7 +50,11 @@ class VoiceStream:
         self.mclk = None
         self.i2s = None
         self.sock = None
-        self.muted = False
+        self.muted = True            # 开机待机: 按上键开语音后才推流 (握手照发, 注册不过期)
+        self.dict_on = False         # 语音输入(长输入会话)开关, 由上键切换
+        self.ptt_active = False      # PTT 按住中, 由下键切换
+        self._mute_deadline = None   # 延迟静音时刻 (ticks_ms)
+        self._last_hs_ms = 0
         # 统计
         self.pkts = 0
         self.bytes_sent = 0
@@ -53,7 +68,6 @@ class VoiceStream:
         self._ping_seq = 0
         self._last_ping_ms = 0
         self._chunk = bytearray(CHUNK_BYTES)
-        self._pkts_since_hs = HANDSHAKE_EVERY   # 启动即握手
 
     # ------------------------------------------------------------------
     # ES8311 初始化 (录音通路)
@@ -187,6 +201,18 @@ class VoiceStream:
     # ------------------------------------------------------------------
     def poll(self):
         """阻塞读一个 32ms 块并推流. 返回本块字节数 (0=跳过)."""
+        now = time.ticks_ms()
+        # 握手纯计时: 静音期间照发, 保住中转音源注册, 控制帧才永远可达
+        if time.ticks_diff(now, self._last_hs_ms) >= HANDSHAKE_EVERY_MS:
+            self._last_hs_ms = now
+            try:
+                self.sock.sendto(HANDSHAKE, (STREAM_IP, STREAM_PORT))
+            except Exception:
+                pass
+        # 延迟静音到期 (语音关/PTT 抬起后的收尾宽限)
+        if self._mute_deadline is not None and time.ticks_diff(now, self._mute_deadline) >= 0:
+            self._mute_deadline = None
+            self.muted = True
         try:
             n = self.i2s.readinto(self._chunk)
         except Exception as e:
@@ -195,13 +221,6 @@ class VoiceStream:
             time.sleep_ms(100)
             return 0
         if n and not self.muted:
-            # 定期向中转重发音源注册 (NAT 重绑定/中转重启自愈)
-            if self._pkts_since_hs >= HANDSHAKE_EVERY:
-                self._pkts_since_hs = 0
-                try:
-                    self.sock.sendto(HANDSHAKE, (STREAM_IP, STREAM_PORT))
-                except Exception:
-                    pass
             ok = False
             try:
                 self.sock.sendto(memoryview(self._chunk)[:n], (STREAM_IP, STREAM_PORT))
@@ -217,7 +236,6 @@ class VoiceStream:
             except Exception:
                 pass
             if ok:
-                self._pkts_since_hs += 1
                 self.pkts += 1
                 self.bytes_sent += n
             else:
@@ -226,6 +244,45 @@ class VoiceStream:
                     print("[!] UDP send dropped (#%d)" % self.send_errors)
         self._poll_ping()
         return n
+
+    # ------------------------------------------------------------------
+    # 语音输入控制 (工牌按键 → 控制帧 → 接收器合成微信输入法快捷键)
+    # ------------------------------------------------------------------
+    def _send_ctrl(self, frame):
+        """控制帧连发 3 遍抗丢包; 阻塞 ~90ms, I2S 8KB 缓冲(256ms)可吸收."""
+        for i in range(CTRL_RETRY):
+            try:
+                self.sock.sendto(frame, (STREAM_IP, STREAM_PORT))
+            except Exception:
+                pass
+            if i < CTRL_RETRY - 1:
+                time.sleep_ms(CTRL_GAP_MS)
+
+    def _unmute(self):
+        self.muted = False
+        self._mute_deadline = None
+
+    def _mute_later(self):
+        if not self.dict_on:         # 长输入会话开着时不静音
+            self._mute_deadline = time.ticks_add(time.ticks_ms(), MUTE_GRACE_MS)
+
+    def set_dict_mode(self, on):
+        """上键: 语音输入(长输入会话)开/关. 开=先广播再解除静音; 关=广播后延迟静音."""
+        self._send_ctrl(CTRL_DICT_ON if on else CTRL_DICT_OFF)
+        self.dict_on = on
+        if on:
+            self._unmute()
+        else:
+            self._mute_later()
+
+    def set_ptt(self, down):
+        """下键: 按住说话. 按下=广播+解除静音; 抬起=广播+延迟静音."""
+        self._send_ctrl(CTRL_PTT_DOWN if down else CTRL_PTT_UP)
+        self.ptt_active = down
+        if down:
+            self._unmute()
+        else:
+            self._mute_later()
 
     def _poll_ping(self):
         now = time.ticks_ms()
