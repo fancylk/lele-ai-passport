@@ -1,0 +1,15 @@
+[package]
+name = "lele-voice-daemon"
+version = "1.0.0"
+edition = "2021"
+description = "乐乐语音桥 Mac 常驻守护: 工牌 UDP 收流 → BlackHole 虚拟麦克风 + 控制帧 → 微信输入法语音快捷键注入 + IME 切换 (§六十五)"
+
+[dependencies]
+cpal = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+libc = "0.2"
+
+[profile.release]
+opt-level = 2
+strip = true

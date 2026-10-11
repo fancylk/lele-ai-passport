@@ -47,3 +47,8 @@ PING_PORT    = 9762               # 延迟探测端口 (badge 发 PING, 中转�
 STREAM_TOKEN = "lele-6deb6d37"    # 音源/订阅注册口令 (与 relay/relay.py 一致)
 SAMPLE_RATE  = 16000              # Hz
 CHUNK_BYTES  = 1024               # 512 样本 = 32ms/包, UDP 载荷安全尺寸
+
+# UDP 打洞 (§六十五): 与终端直连降延迟. 中转经 PONG 尾巴 |PEER=ip:port 捎来
+# 终端映射地址; 双方互发 PNCH 凿 NAT; 收到终端 PNCH 即直连发音频,
+# 10s 收不到 PNCH 自动回退中转. False = 永远走中转.
+PUNCH        = True

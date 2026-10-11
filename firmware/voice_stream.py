@@ -13,7 +13,7 @@ import struct
 import time
 from machine import Pin, PWM, I2S
 from config import (STREAM_IP, STREAM_PORT, PING_PORT, STREAM_TOKEN,
-                    SAMPLE_RATE, CHUNK_BYTES)
+                    SAMPLE_RATE, CHUNK_BYTES, PUNCH)
 
 ES8311_ADDR = 0x18
 MCLK_HZ = SAMPLE_RATE * 256          # 4.096MHz
@@ -68,6 +68,11 @@ class VoiceStream:
         self._ping_seq = 0
         self._last_ping_ms = 0
         self._chunk = bytearray(CHUNK_BYTES)
+        # UDP 打洞 (§六十五): _peer=终端映射地址(PONG|PEER= 捎来), 互发 PNCH;
+        # _direct=终端地址, 收到其 PNCH 即直连发音频, 10s 无 PNCH 回退中转.
+        self._peer = None
+        self._direct = None
+        self._direct_last_ms = 0
 
     # ------------------------------------------------------------------
     # ES8311 初始化 (录音通路)
@@ -222,14 +227,19 @@ class VoiceStream:
             return 0
         if n and not self.muted:
             ok = False
+            # 直连优先: 收到终端 PNCH 后 10s 内音频直发终端, 不经中转
+            if self._direct is not None and time.ticks_diff(now, self._direct_last_ms) > 10000:
+                self._direct = None
+                print("[!] 直连超时, 回退中转")
+            dst = self._direct if self._direct else (STREAM_IP, STREAM_PORT)
             try:
-                self.sock.sendto(memoryview(self._chunk)[:n], (STREAM_IP, STREAM_PORT))
+                self.sock.sendto(memoryview(self._chunk)[:n], dst)
                 ok = True
             except OSError:
                 # ENOMEM: WiFi TX 队列瞬时满, 让一口气重试一次
                 time.sleep_ms(3)
                 try:
-                    self.sock.sendto(memoryview(self._chunk)[:n], (STREAM_IP, STREAM_PORT))
+                    self.sock.sendto(memoryview(self._chunk)[:n], dst)
                     ok = True
                 except OSError:
                     pass
@@ -297,10 +307,16 @@ class VoiceStream:
                 self.pings_sent += 1
             except Exception:
                 pass
-        # 收 PONG (非阻塞)
+            # 打洞: 向终端映射地址发 PNCH (与 PING 同节拍, 每秒一次)
+            if PUNCH and self._peer:
+                try:
+                    self.sock.sendto(b"PNCH" + STREAM_TOKEN.encode(), self._peer)
+                except Exception:
+                    pass
+        # 收 PONG (非阻塞) / 终端 PNCH (直连建立)
         while True:
             try:
-                data, _ = self.sock.recvfrom(64)
+                data, addr = self.sock.recvfrom(128)
             except OSError:
                 break
             except Exception:
@@ -315,6 +331,23 @@ class VoiceStream:
                 self.rtt_max = rtt if self.rtt_max is None else max(self.rtt_max, rtt)
                 self.pongs_recv += 1
                 self.last_pong_ms = time.ticks_ms()
+                # 打洞汇聚: PONG 尾巴 |PEER=ip:port = 终端映射地址 (旧中转无尾巴)
+                if PUNCH and b"|PEER=" in data:
+                    try:
+                        spec = data.split(b"|PEER=", 1)[1].decode()
+                        ip, port = spec.rsplit(":", 1)
+                        peer = (ip, int(port))
+                        if peer != self._peer:
+                            self._peer = peer
+                            print("[+] 打洞目标(终端):", spec)
+                    except Exception:
+                        pass
+            elif PUNCH and len(data) >= 4 and data[:4] == b"PNCH":
+                if data[4:4 + len(STREAM_TOKEN)] == STREAM_TOKEN.encode():
+                    if self._direct != addr:
+                        self._direct = addr
+                        print("[+] 直连建立(终端):", addr)
+                    self._direct_last_ms = time.ticks_ms()
             # 丢弃其它杂散包
 
     # ------------------------------------------------------------------
