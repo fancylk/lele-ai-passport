@@ -126,6 +126,11 @@ impl Trigger {
                 }
                 inj.tap(&self.mods, &self.toggle);
                 crate::logi!("[🎙] {} → 合成 {:?}+{:?}", a.label(), self.mods, self.toggle);
+                crate::notify::send(
+                    if a == Action::DictOn { "dict_on" } else { "dict_off" },
+                    "乐乐语音桥",
+                    if a == Action::DictOn { "🎙 语音输入开 (长输入会话)" } else { "🎙 语音输入结束, 文字上屏" },
+                );
             }
             Action::PttDown => {
                 if self.switch_ime {
@@ -133,10 +138,12 @@ impl Trigger {
                 }
                 inj.hold(&self.mods, &self.ptt);
                 crate::logi!("[🎙] {} → 按住 {:?}", a.label(), self.ptt);
+                crate::notify::send("ptt_down", "乐乐语音桥", "🎙 按住说话开始");
             }
             Action::PttUp => {
                 inj.release(&self.mods, &self.ptt);
                 crate::logi!("[🎙] {} → 松开 {:?}", a.label(), self.ptt);
+                crate::notify::send("ptt_up", "乐乐语音桥", "🎙 说话结束, 识别上屏");
             }
         }
         // 输入源漂移自愈: 纯 Fn 按住-松开(PTT 无中途击键)会被系统认作

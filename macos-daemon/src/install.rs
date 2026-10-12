@@ -6,6 +6,7 @@ use std::process::Command;
 use cpal::traits::{DeviceTrait, HostTrait};
 
 pub const LABEL: &str = "cn.taoge.lele-voice-daemon";
+pub const MENUBAR_LABEL: &str = "cn.taoge.lele-voice-menubar";
 
 pub fn plist_path() -> PathBuf {
     home().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
@@ -21,6 +22,77 @@ fn home() -> PathBuf {
 
 fn config_path() -> PathBuf {
     home().join(".config/lele-voice/config.toml")
+}
+
+fn menubar_plist_path() -> PathBuf {
+    home().join("Library/LaunchAgents").join(format!("{MENUBAR_LABEL}.plist"))
+}
+
+fn menubar_bin_path() -> PathBuf {
+    home().join("Applications/lele-voice-menubar")
+}
+
+/// 菜单栏小程序源码位置 (与 macos-daemon 同仓)
+fn menubar_source() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let p = manifest_dir.parent()?.join("macos-menubar/main.swift");
+    p.exists().then_some(p)
+}
+
+/// 编译并安装菜单栏 App + LaunchAgent (swiftc 缺席时仅提示, 不算失败)
+fn install_menubar() {
+    let Some(src) = menubar_source() else {
+        println!("[=] 未找到菜单栏源码(macos-menubar/main.swift), 跳过菜单栏安装");
+        return;
+    };
+    let dst = menubar_bin_path();
+    if let Some(dir) = dst.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match Command::new("swiftc")
+        .arg("-O").arg(&src).arg("-o").arg(&dst)
+        .status()
+    {
+        Ok(s) if s.success() => println!("[+] 菜单栏已安装: {}", dst.display()),
+        _ => {
+            println!("[!] swiftc 编译菜单栏失败, 跳过 (需要 Xcode Command Line Tools)");
+            return;
+        }
+    }
+    let plist = menubar_plist_path();
+    if let Some(dir) = plist.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{MENUBAR_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array><string>{}</string></array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+</dict>
+</plist>
+"#,
+        dst.display()
+    );
+    if let Err(e) = std::fs::write(&plist, xml) {
+        println!("[!] 写菜单栏 plist 失败: {e}");
+        return;
+    }
+    let uid = unsafe { libc::getuid() };
+    let _ = Command::new("launchctl")
+        .args(["bootout", &format!("gui/{uid}"), &plist.display().to_string()])
+        .status();
+    match Command::new("launchctl")
+        .args(["bootstrap", &format!("gui/{uid}"), &plist.display().to_string()])
+        .status()
+    {
+        Ok(s) if s.success() => println!("[+] 菜单栏已加载 (开机自启)"),
+        _ => println!("[!] 菜单栏 launchctl bootstrap 失败"),
+    }
 }
 
 pub const EXAMPLE_TOML: &str = r#"# 乐乐语音桥 Mac 守护进程配置 (lele-voice-daemon)
@@ -110,6 +182,7 @@ pub fn install() {
     crate::logi!("[+] 已安装 {}", app_path().display());
 
     write_config_template(false);
+    install_menubar();
 
     let plist = plist_path();
     if let Some(dir) = plist.parent() {
@@ -166,17 +239,20 @@ pub fn install() {
     println!("  点 + 添加并勾选: {}", dst.display());
     println!("  (不授权则快捷键注入会被系统静默丢弃; 输入法切换/音频不受影响)");
     println!("  授权后: launchctl kickstart -k gui/{uid}/{LABEL}");
+    println!();
+    println!("菜单栏小程序已装: 菜单栏出现 🎙/🔗/☁️ 图标, 点开即状态/日志/配置/通知开关");
 }
 
 pub fn uninstall() {
     let uid = unsafe { libc::getuid() };
-    let plist = plist_path();
-    let _ = Command::new("launchctl")
-        .args(["bootout", &format!("gui/{uid}"), &plist.display().to_string()])
-        .status();
-    match std::fs::remove_file(&plist) {
-        Ok(()) => println!("[+] LaunchAgent 已卸载 ({})", plist.display()),
-        Err(e) => println!("[=] plist 不存在或删除失败: {e}"),
+    for (label, plist) in [(LABEL, plist_path()), (MENUBAR_LABEL, menubar_plist_path())] {
+        let _ = Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}"), &plist.display().to_string()])
+            .status();
+        match std::fs::remove_file(&plist) {
+            Ok(()) => println!("[+] LaunchAgent 已卸载 ({label})"),
+            Err(e) => println!("[=] {label} plist 不存在: {e}"),
+        }
     }
 }
 
@@ -201,6 +277,11 @@ pub fn doctor() {
         }
     } else {
         println!("  未安装 (lele-voice-daemon install)");
+    }
+    if menubar_plist_path().exists() {
+        println!("菜单栏: {} ✓ (开机自启)", menubar_bin_path().display());
+    } else {
+        println!("菜单栏: 未安装 (install 时自动 swiftc 编译, 需 CLT)");
     }
     println!();
 

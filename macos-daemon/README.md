@@ -100,6 +100,19 @@ PNCH+token 双向互发(每秒)          # 凿开两侧 NAT 绑定
   家宽路由器与公司 NAT 是否支持打洞取决于其 NAT 类型, 对称 NAT 打不通会
   自动留在中转通道(无损)。
 
+## 菜单栏小程序 + 系统通知(§六十七)
+
+`install` 会自动用 swiftc 编译安装**菜单栏小程序**(需 Xcode CLT):
+`~/Applications/lele-voice-menubar` + LaunchAgent `cn.taoge.lele-voice-menubar`。
+
+- 菜单栏图标即状态:**🎙 有声音 / 🔗 直连待机 / ☁️ 中转待机 / ❗ 守护无响应**
+- 点开菜单:状态总览(收包/码率/RTT/直连)、最近事件、**打开实时日志**(Console.app)、
+  **编辑配置**(TextEdit 打开 config.toml)、**系统通知开关**(改配置文件,守护 30s 热生效)、
+  **重启守护**
+- **系统通知**:`[ui] notify = true`(默认开)时,收到事件即弹通知——
+  🎙 语音输入开/关、按住说话开始/结束(PTT)、🔗 直连建立;同类通知 30s 限频。
+  通知归属 Script Editor(osascript 身份),首次可在系统设置→通知里调整样式。
+
 ## 踩坑实录(重写前必读)
 
 1. **TIS 三坑**(都有崩溃报告为证):
@@ -125,6 +138,11 @@ PNCH+token 双向互发(每秒)          # 凿开两侧 NAT 绑定
    彻底回避 = 把微信输入法两语音快捷键改绑成非 Fn 组合键(config 同步改)。
 6. `AppleFnUsageType=1`(Fn 轻击=表情面板)与 WeType 快捷键不冲突:
    系统只消费"纯轻击",组合键归 IME。
+7. **Swift 读日志尾部被汉字 UTF-8 字节边界咬**:按固定 64KB 边界 seek+读,
+   首字节恰是汉字续字节时 `String(data:encoding:.utf8)` 返回 **nil**(整段变空),
+   状态判定恒 false。修复=用 `String(decoding: data, as: UTF8.self)`(lossy)。
+8. 直连模式下守护绑**临时端口**(connect 中转),本地想直发控制帧到 9761 是到不了
+   守护的——排障时经中转触发,或看菜单栏/日志。
 
 ## 与旧方案的关系
 

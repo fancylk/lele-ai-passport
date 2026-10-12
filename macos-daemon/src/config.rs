@@ -3,9 +3,9 @@
 //! 键名既支持数字(Mac keycode)也支持助记名: fn/space/ctrl/alt/cmd/shift/tab/
 //! enter/esc/f1..f12, 逗号分隔组合键.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub relay: RelayCfg,
@@ -15,11 +15,27 @@ pub struct Config {
     pub trigger: TriggerCfg,
     #[serde(default)]
     pub punch: PunchCfg,
+    #[serde(default)]
+    pub ui: UiCfg,
+}
+
+/// 菜单栏 App / 系统通知相关 (§六十七)
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UiCfg {
+    /// 收到事件(语音触发/直连建立)时发 macOS 系统通知
+    #[serde(default = "d_true")]
+    pub notify: bool,
+}
+
+impl Default for UiCfg {
+    fn default() -> Self {
+        Self { notify: true }
+    }
 }
 
 /// UDP 打洞 (§六十五): 经中转换到双方公网映射地址后互发 PNCH,
 /// 工牌收到 PNCH 即直连发音频(10s 无 PNCH 自动回退中转).
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PunchCfg {
     #[serde(default = "d_true")]
     pub enabled: bool,
@@ -40,7 +56,7 @@ impl Default for PunchCfg {
     }
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct RelayCfg {
     /// 中转服务器 IP; 留空 = LAN 直连模式(本机绑 9761 收工牌推流)
     #[serde(default = "d_host")]
@@ -55,7 +71,7 @@ pub struct RelayCfg {
     pub tag: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AudioCfg {
     /// 输出设备名(子串匹配) = 虚拟麦克风宿主
     #[serde(default = "d_device")]
@@ -65,7 +81,7 @@ pub struct AudioCfg {
     pub source_rate: u32,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TriggerCfg {
     #[serde(default = "d_true")]
     pub enabled: bool,

@@ -27,6 +27,8 @@ pub struct Stats {
     pub underruns: AtomicU64,
     /// 本机→中转 RTT ms (relay 模式)
     pub rtt_ms: AtomicU32,
+    /// 打洞直连已建立 (§六十七 UI 展示)
+    pub direct: AtomicBool,
 }
 
 impl Stats {

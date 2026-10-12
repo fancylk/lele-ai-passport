@@ -17,9 +17,11 @@ mod install;
 #[macro_use]
 mod logx;
 mod net;
+mod notify;
 mod trigger;
 
 use std::sync::Arc;
+use config::Config;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,7 +64,7 @@ fn main() {
 fn run(args: &[String]) {
     let (cfg, cfg_path) = config::load(args);
     logi!("lele-voice-daemon {VERSION} 启动 (配置: {})",
-        cfg_path.map(|p| p.display().to_string()).unwrap_or_else(|| "内置默认".into()));
+        cfg_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "内置默认".into()));
     logi!("  中转={}:{} 探测={} 设备={:?} 触发={} ptt={:?} toggle={:?} mods={:?} ime={}",
         cfg.relay.host, cfg.relay.port, cfg.relay.ping_port, cfg.audio.device,
         cfg.trigger.enabled, cfg.trigger.ptt_keys, cfg.trigger.toggle_keys,
@@ -74,8 +76,22 @@ fn run(args: &[String]) {
     }
 
     let trigger = trigger::Trigger::new(&cfg.trigger);
+    notify::set_enabled(cfg.ui.notify);
 
     let stats = Arc::new(audio::Stats::default());
+    {
+        // notify 开关热重载: 30s 轮询配置文件 (菜单栏 App 切换开关后无需重启)
+        let cfg_path_for_notify = cfg_path.clone();
+        std::thread::Builder::new().name("notify-rl".into()).spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let Some(p) = cfg_path_for_notify.clone().or_else(config::default_path) else { continue };
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                if let Ok(c) = toml::from_str::<Config>(&text) {
+                    notify::set_enabled(c.ui.notify);
+                }
+            }
+        }).ok();
+    }
     let shared = audio::SinkShared::new();
     let params = Arc::new(audio::DeviceParams::default());
     // 音频 owner 线程自带限时打开/自愈/设备缺席重试, 不阻塞主流程

@@ -119,6 +119,8 @@ fn handle(
         if *cell != Some(addr) {
             crate::logi!("[打洞] 工牌直连探测到达: {addr} (已回 ACK)");
             *cell = Some(addr);
+            stats.direct.store(true, Ordering::Relaxed);
+            crate::notify::send("direct", "乐乐语音桥", "🔗 工牌直连已建立 (音频端到端)");
         }
         return;
     }
