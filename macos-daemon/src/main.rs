@@ -16,6 +16,7 @@ mod inject;
 mod install;
 #[macro_use]
 mod logx;
+mod mic;
 mod net;
 mod notify;
 mod trigger;
@@ -24,6 +25,11 @@ use std::sync::Arc;
 use config::Config;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+extern "C" fn sig_handler(sig: libc::c_int) {
+    mic::cleanup_mic_on_exit();
+    std::process::exit(128 + sig);
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -62,20 +68,25 @@ fn main() {
 }
 
 fn run(args: &[String]) {
+    unsafe {
+        libc::signal(libc::SIGINT, sig_handler as *const () as usize);
+        libc::signal(libc::SIGTERM, sig_handler as *const () as usize);
+    }
+
     let (cfg, cfg_path) = config::load(args);
     logi!("lele-voice-daemon {VERSION} 启动 (配置: {})",
         cfg_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "内置默认".into()));
-    logi!("  中转={}:{} 探测={} 设备={:?} 触发={} ptt={:?} toggle={:?} mods={:?} ime={}",
+    logi!("  中转={}:{} 探测={} 设备={:?} 触发={} ptt={:?} toggle={:?} mods={:?} ime={} switch_mic={}",
         cfg.relay.host, cfg.relay.port, cfg.relay.ping_port, cfg.audio.device,
         cfg.trigger.enabled, cfg.trigger.ptt_keys, cfg.trigger.toggle_keys,
-        cfg.trigger.mods, cfg.trigger.input_source_id);
+        cfg.trigger.mods, cfg.trigger.input_source_id, cfg.trigger.switch_mic);
 
     if !inject::ax_trusted() {
         logi!("[!] 辅助功能权限缺失 → 快捷键注入会被系统静默丢弃(音频/切输入法不受影响).");
-        logi!("    系统设置→隐私与安全性→辅助功能 添加: {}", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default());
+        logi!("    系统设置→隐私与安全性→辅助功能 请勾选: {}", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default());
     }
 
-    let trigger = trigger::Trigger::new(&cfg.trigger);
+    let trigger = trigger::Trigger::new(&cfg.trigger, &cfg.audio.device);
     notify::set_enabled(cfg.ui.notify);
 
     let stats = Arc::new(audio::Stats::default());

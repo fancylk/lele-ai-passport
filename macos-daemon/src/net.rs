@@ -27,9 +27,9 @@ pub fn run(cfg: &Config, mut feeder: Feeder, stats: Arc<Stats>, trigger: Arc<Tri
     });
     sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
 
-    // 打洞汇聚状态: peer=音源映射地址(SRCQ 得到), direct=直连已建立的对端地址
+    // 打洞汇聚状态: peer=音源映射地址(SRCQ 得到), direct=直连已建立的对端地址与最近活跃时间
     let peer_cell: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
-    let direct_cell: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
+    let direct_cell: Arc<Mutex<Option<(std::net::SocketAddr, Instant)>>> = Arc::new(Mutex::new(None));
 
     if relay_mode {
         let s = sock.clone();
@@ -72,7 +72,7 @@ pub fn run(cfg: &Config, mut feeder: Feeder, stats: Arc<Stats>, trigger: Arc<Tri
     let mut buf = [0u8; 4096];
     loop {
         match sock.recv_from(&mut buf) {
-            Ok((n, addr)) => handle(&buf[..n], addr, &sock, &cfg.relay.token, cfg.audio.source_rate,
+            Ok((n, addr)) => handle(&buf[..n], addr, &sock, &cfg.relay.token, &cfg.relay.tag, cfg.audio.source_rate,
                                     &mut feeder, &trigger, &stats, &peer_cell, &direct_cell),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => {
@@ -84,10 +84,21 @@ pub fn run(cfg: &Config, mut feeder: Feeder, stats: Arc<Stats>, trigger: Arc<Tri
 }
 
 fn handle(
-    d: &[u8], addr: std::net::SocketAddr, sock: &Arc<UdpSocket>, token: &str, src_rate: u32,
-    feeder: &mut Feeder, trigger: &Arc<Trigger>, stats: &Arc<Stats>,
-    peer_cell: &Arc<Mutex<Option<std::net::SocketAddr>>>, direct_cell: &Arc<Mutex<Option<std::net::SocketAddr>>>,
+    d: &[u8], addr: std::net::SocketAddr, sock: &Arc<UdpSocket>, token: &str, own_tag: &str,
+    src_rate: u32, feeder: &mut Feeder, trigger: &Arc<Trigger>, stats: &Arc<Stats>,
+    peer_cell: &Arc<Mutex<Option<std::net::SocketAddr>>>,
+    direct_cell: &Arc<Mutex<Option<(std::net::SocketAddr, Instant)>>>,
 ) {
+    // 若此包来自直连对端, 刷新直连活跃时间戳
+    {
+        let mut cell = direct_cell.lock().unwrap();
+        if let Some((direct_addr, ref mut last_seen)) = *cell {
+            if direct_addr == addr {
+                *last_seen = Instant::now();
+            }
+        }
+    }
+
     if d.starts_with(b"PONG") {
         if d.len() >= 12 {
             let sent = f64::from_le_bytes(d[4..12].try_into().unwrap());
@@ -116,16 +127,35 @@ fn handle(
             let _ = sock.send_to(&a, addr);
         }
         let mut cell = direct_cell.lock().unwrap();
-        if *cell != Some(addr) {
+        let was_different = match *cell {
+            Some((curr, _)) => curr != addr,
+            None => true,
+        };
+        *cell = Some((addr, Instant::now()));
+        if was_different {
             crate::logi!("[打洞] 工牌直连探测到达: {addr} (已回 ACK)");
-            *cell = Some(addr);
             stats.direct.store(true, Ordering::Relaxed);
             crate::notify::send("direct", "乐乐语音桥", "🔗 工牌直连已建立 (音频端到端)");
         }
         return;
     }
+    // §六十八 兜底: 固件二期控制帧带 @tag 尾巴, 不匹配本机 tag 则忽略
+    // (relay 目标路由为主, 此处防御 relay 状态丢失/广播模式)
     if let Some(action) = Trigger::match_frame(d, token) {
+        if let Some(want) = frame_target(d, token) {
+            if want != own_tag {
+                crate::logi!("[目标] 忽略发往 {want} 的语音帧 (本机 tag={own_tag})");
+                return;
+            }
+        }
         trigger.submit(action, d);
+        return;
+    }
+    if d.starts_with(b"TGTM1") && d.len() > 19 && d[5..18].eq(token.as_bytes()) && d[18] == b'@' {
+        let want = String::from_utf8_lossy(&d[19..]).trim().to_string();
+        let mine = want == own_tag;
+        crate::logi!("[目标] 工牌目标主机 → {want}{}",
+            if mine { " (本机)" } else { " (其他主机, 待机)" });
         return;
     }
     if d.starts_with(b"LELE1") || d.starts_with(b"SUB_OK") {
@@ -135,6 +165,17 @@ fn handle(
     let n = d.len() - d.len() % 2;
     let pcm: Vec<i16> = d[..n].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
     feeder.feed_pcm16(&pcm, src_rate);
+    trigger.on_audio();
+}
+
+/// 控制帧尾部 @tag (§六十八): "DICT1<token>@mac" → Some("mac"); 无尾巴 → None
+fn frame_target<'a>(d: &'a [u8], token: &str) -> Option<&'a str> {
+    let tlen = token.len();
+    if d.len() > 5 + tlen + 1 && &d[5..5 + tlen] == token.as_bytes() && d[5 + tlen] == b'@' {
+        Some(std::str::from_utf8(&d[6 + tlen..]).ok()?.trim())
+    } else {
+        None
+    }
 }
 
 fn parse_sockaddr(s: &str) -> Option<std::net::SocketAddr> {
@@ -193,11 +234,25 @@ fn keepalive_loop(sock: Arc<UdpSocket>, host: &str, audio_port: u16, ping_port: 
     }
 }
 
-fn stats_loop(stats: Arc<Stats>, relay_mode: bool, direct_cell: Arc<Mutex<Option<std::net::SocketAddr>>>) {
+fn stats_loop(stats: Arc<Stats>, relay_mode: bool, direct_cell: Arc<Mutex<Option<(std::net::SocketAddr, Instant)>>>) {
     let mut last_bytes = 0u64;
     let t0 = Instant::now();
     loop {
         std::thread::sleep(Duration::from_secs(5));
+        let direct_active = {
+            let mut cell = direct_cell.lock().unwrap();
+            if let Some((_, last_seen)) = *cell {
+                if last_seen.elapsed() > Duration::from_secs(10) {
+                    *cell = None;
+                    stats.direct.store(false, Ordering::Relaxed);
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            }
+        };
         let pkts = stats.pkts.load(Ordering::Relaxed);
         let bytes = stats.bytes.load(Ordering::Relaxed);
         let kbps = (bytes - last_bytes) * 8 / 1024 / 5;
@@ -207,7 +262,7 @@ fn stats_loop(stats: Arc<Stats>, relay_mode: bool, direct_cell: Arc<Mutex<Option
         let underruns = stats.underruns.load(Ordering::Relaxed);
         let rtt = stats.rtt_ms.load(Ordering::Relaxed);
         let relay_info = if relay_mode { format!("中转RTT≈{rtt}ms ") } else { String::new() };
-        let direct = if direct_cell.lock().unwrap().is_some() { "直连✓ " } else { "" };
+        let direct = if direct_active { "直连✓ " } else { "" };
         crate::logi!(
             "[{:6.0}s] 收 {pkts} 包 {}KB ({kbps}kbps) {}{}峰值{peak} 丢弃{drops} 欠载{underruns}{}",
             t0.elapsed().as_secs_f32(), bytes / 1024, relay_info, direct,

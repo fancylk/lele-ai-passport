@@ -20,6 +20,7 @@ C_BALL   = 0xFD20   # 金球
 C_WHITE  = 0xFFFF
 C_GREY   = 0x630C
 C_RED    = 0xF800
+C_GREEN  = 0x07E0
 
 W, H = 240, 320
 PW = 64             # 球拍宽

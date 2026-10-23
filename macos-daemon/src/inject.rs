@@ -13,6 +13,7 @@ const K_CG_HID_EVENT_TAP: u32 = 0;
 extern "C" {
     fn CGEventCreateKeyboardEvent(src: *const c_void, key: u16, down: bool) -> *mut c_void;
     fn CGEventSetFlags(ev: *mut c_void, flags: u64);
+    fn CGEventGetFlags(ev: *mut c_void) -> u64;
     fn CGEventPost(tap: u32, ev: *mut c_void);
 }
 
@@ -30,6 +31,13 @@ pub fn ax_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
+/// 判断 keycode 是否属于 macOS 修饰键 (Shift/Ctrl/Alt/Cmd/Fn 等).
+/// 修饰键在 CGEventCreateKeyboardEvent 时系统会自动生成完整的设备标志位(如 NX_SECONDARYFNMASK / 0x20800000),
+/// 释放时系统也会自动清除对应标志位(0x20000000); 切勿用静态标志位无差别覆写, 否则会导致抬起状态丢失或标志位错乱.
+fn is_modifier(key: u16) -> bool {
+    matches!(key, 54..=63)
+}
+
 pub struct Injector {
     flag: u64,
 }
@@ -45,8 +53,10 @@ impl Injector {
             if ev.is_null() {
                 return;
             }
-            if self.flag != 0 {
-                CGEventSetFlags(ev, self.flag);
+            // 仅对普通按键 (如空格 49) 附加当前持有的修饰键标志位; 修饰键自身保持系统原生 flagsChanged 事件位
+            if !is_modifier(key) && self.flag != 0 {
+                let base = CGEventGetFlags(ev);
+                CGEventSetFlags(ev, base | self.flag);
             }
             CGEventPost(K_CG_HID_EVENT_TAP, ev);
             CFRelease(ev);
@@ -74,6 +84,7 @@ impl Injector {
     }
 
     /// 轻击一次组合键
+    #[allow(dead_code)]
     pub fn tap(&self, mods: &[u16], keys: &[u16]) {
         self.hold(mods, keys);
         std::thread::sleep(Duration::from_millis(40));
@@ -90,7 +101,7 @@ pub fn mod_flag(spec: &str) -> Result<(u64, Vec<u16>), String> {
     for m in spec.split(',') {
         match m.trim().to_lowercase().as_str() {
             "" => {}
-            "fn" => flag |= 0x0040_0000, // kCGEventFlagMaskSecondaryFn
+            "fn" => flag |= 0x0080_0000, // NX_SECONDARYFNMASK (macOS IOLLEvent.h, 实测微信输入法精准校验)
             "ctrl" => {
                 flag |= 0x0004_0000;
                 keys.push(59);

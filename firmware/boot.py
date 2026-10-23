@@ -16,7 +16,7 @@ except Exception:
 # → 从 /backup 逐文件还原, 保证设备永远能启动到上一个完整版本.
 try:
     import os
-    if "/ota.pending" in os.listdir("/"):
+    if "ota.pending" in os.listdir("/"):
         names = open("/ota.pending").read().split()
         for n in names:
             n = n.strip()

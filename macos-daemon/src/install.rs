@@ -17,7 +17,7 @@ pub fn log_path() -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+    crate::config::home_dir()
 }
 
 fn config_path() -> PathBuf {
@@ -119,6 +119,14 @@ toggle_keys = "63,49"  # 工牌上键语音开关   = 轻击该组合键
 mods = "fn"            # 修饰键: fn/ctrl/alt/cmd/shift
 switch_ime = true      # 触发前自动切输入法到微信输入法
 input_source_id = "com.tencent.inputmethod.wetype.pinyin"
+
+[punch]
+enabled = true          # 启用 UDP 打洞端到端直传
+interval_ms = 1000      # PNCH 探测间隔 (ms)
+probe_every = 5         # 中转音源查询间隔 (s)
+
+[ui]
+notify = true           # 收到事件(语音触发/直连建立)时发 macOS 系统通知
 "#;
 
 pub fn write_config_template(force: bool) -> PathBuf {
@@ -158,6 +166,7 @@ fn info_plist_xml() -> String {
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0.0</string>
     <key>LSUIElement</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>乐乐语音桥需要访问音频输出与虚拟音频设备以传输工牌语音流</string>
 </dict>
 </plist>
 "#
@@ -179,7 +188,20 @@ pub fn install() {
     if let Err(e) = std::fs::copy(&src, &dst) {
         return eprintln!("[!] 复制二进制 {} → {} 失败: {e}", src.display(), dst.display());
     }
-    crate::logi!("[+] 已安装 {}", app_path().display());
+    let _ = Command::new("codesign")
+        .args([
+            "--force",
+            "--deep",
+            "-s",
+            "-",
+            "-i",
+            "cn.taoge.lele-voice-daemon",
+            "-r",
+            "=designated => identifier \"cn.taoge.lele-voice-daemon\"",
+            &app_path().display().to_string(),
+        ])
+        .status();
+    crate::logi!("[+] 已安装并签名 {}", app_path().display());
 
     write_config_template(false);
     install_menubar();
@@ -206,13 +228,17 @@ pub fn install() {
     <key>AssociatedBundleIdentifiers</key>
     <array><string>{LABEL}</string></array>
     <key>EnvironmentVariables</key>
-    <dict><key>__CFBundleIdentifier</key><string>{LABEL}</string></dict>
+    <dict>
+        <key>HOME</key><string>{}</string>
+        <key>__CFBundleIdentifier</key><string>{LABEL}</string>
+    </dict>
     <key>StandardOutPath</key><string>{}</string>
     <key>StandardErrorPath</key><string>{}</string>
 </dict>
 </plist>
 "#,
         dst.display(),
+        home().display(),
         log.display(),
         log.display()
     );
@@ -257,6 +283,7 @@ pub fn uninstall() {
 }
 
 pub fn doctor() {
+    std::env::set_var("__CFBundleIdentifier", LABEL);
     let cfg_path = config_path();
     println!("── lele-voice-daemon doctor ──");
     println!("二进制: {}", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default());
@@ -269,7 +296,7 @@ pub fn doctor() {
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
-        if st.contains("\"state\"") {
+        if st.contains("state = running") || st.contains("state = ") || st.contains("\"state\"") {
             let running = st.contains("state = running");
             println!("  已加载, state = {}", if running { "running ✓" } else { "非 running(看日志)" });
         } else {
@@ -297,17 +324,61 @@ pub fn doctor() {
     println!();
 
     // 1. 输出设备(虚拟麦克风宿主)
-    let host = cpal::default_host();
-    let mut found = false;
     println!("输出设备(cpal):");
-    if let Ok(devs) = host.output_devices() {
-        for d in devs {
-            let name = d.name().unwrap_or_else(|_| "?".into());
-            let mark = if name.to_lowercase().contains(&cfg.audio.device.to_lowercase()) { found = true; " ← 配置目标" } else { "" };
-            println!("  - {name}{mark}");
+    let dev_hint = cfg.audio.device.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let host = cpal::default_host();
+        let mut list = Vec::new();
+        let mut target_found = false;
+        if let Ok(devs) = host.output_devices() {
+            for d in devs {
+                let name = d.name().unwrap_or_else(|_| "?".into());
+                let is_target = name.to_lowercase().contains(&dev_hint.to_lowercase());
+                if is_target {
+                    target_found = true;
+                }
+                list.push((name, is_target));
+            }
+        }
+        let _ = tx.send((list, target_found));
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok((list, target_found)) => {
+            for (name, is_target) in list {
+                println!("  - {name}{}", if is_target { " ← 配置目标" } else { "" });
+            }
+            println!("  {}", if target_found {
+                format!("✓ 找到 {:?}", cfg.audio.device)
+            } else {
+                format!("✗ 未找到 {:?} — BlackHole 装了吗? brew install blackhole-2ch", cfg.audio.device)
+            });
+        }
+        Err(_) => {
+            println!("  ✗ 查询输出设备超时(5s) —— coreaudiod 可能被楔死, 终端恢复: sudo killall coreaudiod");
         }
     }
-    println!("  {}", if found { format!("✓ 找到 {:?}", cfg.audio.device) } else { format!("✗ 未找到 {:?} — BlackHole 装了吗? brew install blackhole-2ch", cfg.audio.device) });
+    println!();
+
+    // 1.1 系统默认输入麦克风与动态切麦
+    println!("系统输入麦克风 (CoreAudio):");
+    if let Some(in_id) = crate::mic::get_default_input_device() {
+        let in_name = crate::mic::get_device_name(in_id).unwrap_or_else(|| format!("ID:{in_id}"));
+        println!("  - 当前默认麦克风: {in_name} (ID: {in_id})");
+        if let Some((target_id, target_name)) = crate::mic::find_input_device_by_hint(&cfg.audio.device) {
+            println!("  - 配套虚拟麦克风: {target_name} (ID: {target_id}) ✓");
+            if cfg.trigger.switch_mic {
+                println!("  - 动态切麦模式: 已启用 ✓ (推流时秒切 {target_name}, 结束秒回 {in_name})");
+            } else {
+                println!("  - 动态切麦模式: 已停用 (switch_mic = false)");
+            }
+        } else {
+            println!("  ✗ 未找到配套虚拟麦克风 {:?} 输入端点!", cfg.audio.device);
+        }
+    } else {
+        println!("  ✗ 查询系统默认输入麦克风失败");
+    }
     println!();
 
     // 2. 输入源
@@ -317,12 +388,15 @@ pub fn doctor() {
     println!("  目标 {} → {st}", cfg.trigger.input_source_id);
     println!();
 
+    // 2.1 微信输入法设置自检 (MMKV)
+    check_wetype_mmkv(&cfg.trigger);
+
     // 3. 辅助功能
     let ax = crate::inject::ax_trusted();
     println!("辅助功能授权: {}", if ax {
         "已授予 ✓ (注意: 无授权时注入也会静默失败, 以面板是否弹出为准)"
     } else {
-        "✗ 未授予 → 快捷键注入必失效. 系统设置→隐私与安全性→辅助功能 添加本二进制"
+        "✗ 未授予 → 快捷键注入必失效. 系统设置→隐私与安全性→辅助功能 勾选本应用"
     });
     println!();
 
@@ -341,4 +415,81 @@ pub fn doctor() {
     } else {
         println!("LAN 直连模式: 无中转探测");
     }
+}
+
+fn check_wetype_mmkv(cfg: &crate::config::TriggerCfg) {
+    let p = home().join("Library/Application Support/WeType/mmkv/wetype.settings");
+    if !p.exists() {
+        return;
+    }
+    let Ok(buf) = std::fs::read(&p) else { return };
+    if buf.len() < 8 { return };
+
+    let mut pos = 8;
+    let mut map = std::collections::HashMap::new();
+    while pos < buf.len() {
+        let (klen, next_pos) = read_varint(&buf, pos);
+        pos = next_pos;
+        if klen == 0 || pos + klen > buf.len() { break; }
+        let k = &buf[pos..pos+klen];
+        pos += klen;
+        let (vlen, next_pos) = read_varint(&buf, pos);
+        pos = next_pos;
+        if pos + vlen > buf.len() { break; }
+        let v = &buf[pos..pos+vlen];
+        pos += vlen;
+        if let Ok(ks) = std::str::from_utf8(k) {
+            map.insert(ks.to_string(), v.to_vec());
+        }
+    }
+
+    println!("微信输入法设置检查 (MMKV):");
+    if let Some(dev) = map.get("voice.input.preferredDeviceUID.v2") {
+        let s = String::from_utf8_lossy(dev);
+        let s_clean = s.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+        if s.contains("__wetype_auto__") {
+            println!("  - 首选麦克风: 跟随系统默认 ({s_clean}) ✓ (完美适配动态切麦)");
+        } else if s.contains("BlackHole") {
+            println!("  - 首选麦克风: {s_clean} (固定选择 BlackHole 2ch) ✓");
+        } else {
+            println!("  - 首选麦克风: {s_clean} ⚠️ 建议在微信输入法设置中设为「自动」(跟随系统默认设备)");
+        }
+    }
+    if let Some(toggle) = map.get("voiceToggleShortcut_keyCodes") {
+        let s = String::from_utf8_lossy(toggle);
+        let s_clean = s.trim_matches(|c: char| c != '[' && c != ']' && !c.is_numeric() && c != ',');
+        println!("  - 长输入快捷键: {s_clean} (配置: {:?})", cfg.toggle_keys);
+    }
+    if let Some(ptt) = map.get("voicePTTShortcut_keyCodes") {
+        let s = String::from_utf8_lossy(ptt);
+        let s_clean = s.trim_matches(|c: char| c != '[' && c != ']' && !c.is_numeric() && c != ',');
+        let matches = s_clean.contains(&cfg.ptt_keys);
+        println!("  - 按住说话快捷键: {s_clean} (配置: {:?}){}", cfg.ptt_keys, if matches { " ✓" } else { " ⚠️ 两端不一致!" });
+        if !matches {
+            println!("    提示: 请在微信输入法设置→语音输入 中将【按住说话】设为 Fn 键，或修改 config.toml 中的 ptt_keys");
+        }
+    }
+    println!();
+}
+
+fn read_varint(buf: &[u8], mut pos: usize) -> (usize, usize) {
+    let mut val = 0usize;
+    let mut shift = 0;
+    while pos < buf.len() {
+        let b = buf[pos];
+        pos += 1;
+        if shift < 64 {
+            if let Some(s) = ((b & 0x7f) as usize).checked_shl(shift as u32) {
+                val |= s;
+            }
+        }
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 64 {
+            break;
+        }
+    }
+    (val, pos)
 }

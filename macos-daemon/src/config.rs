@@ -100,6 +100,9 @@ pub struct TriggerCfg {
     /// 目标输入法 bundle id
     #[serde(default = "d_ime")]
     pub input_source_id: String,
+    /// 触发语音输入时自动切换系统默认麦克风至虚拟声卡, 结束后自动还原
+    #[serde(default = "d_true")]
+    pub switch_mic: bool,
 }
 
 fn d_host() -> String { "124.221.187.167".into() }
@@ -130,6 +133,7 @@ impl Default for TriggerCfg {
         Self {
             enabled: true, ptt_keys: d_ptt(), toggle_keys: d_toggle(),
             mods: d_mods(), switch_ime: true, input_source_id: d_ime(),
+            switch_mic: true,
         }
     }
 }
@@ -176,10 +180,26 @@ pub fn resolve_path(args: &[String]) -> Option<std::path::PathBuf> {
     None
 }
 
+pub fn home_dir() -> std::path::PathBuf {
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.trim().is_empty() {
+            return std::path::PathBuf::from(h);
+        }
+    }
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if !pw.is_null() && !(*pw).pw_dir.is_null() {
+            let s = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy();
+            if !s.is_empty() {
+                return std::path::PathBuf::from(s.as_ref());
+            }
+        }
+    }
+    std::path::PathBuf::from("/tmp")
+}
+
 pub fn default_path() -> Option<std::path::PathBuf> {
-    std::env::var("HOME").ok().map(|h| {
-        std::path::PathBuf::from(h).join(".config/lele-voice/config.toml")
-    })
+    Some(home_dir().join(".config/lele-voice/config.toml"))
 }
 
 pub fn load(args: &[String]) -> (Config, Option<std::path::PathBuf>) {

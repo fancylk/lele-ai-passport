@@ -23,10 +23,13 @@ HANDSHAKE_EVERY_MS = 10000           # 握手纯计时, 静音期间也发: 中�
 
 # 语音输入控制帧 (2026-10-11 §六十四): 接收器识别后合成微信输入法语音快捷键.
 # 中转对已注册音源的未知前缀包原样转发(relay.py 音频分支), 无需改中转.
-CTRL_DICT_ON  = b"DICT1" + STREAM_TOKEN.encode()   # 上键: 长输入会话开
+# 控制帧前缀 (发送时附 token + "@目标tag", §六十八: relay 按目标 tag 路由防多主机错乱)
+CTRL_DICT_ON  = b"DICT1"   # 上键: 长输入会话开
 CTRL_DICT_OFF = b"DICT0" + STREAM_TOKEN.encode()   # 上键: 长输入会话关
-CTRL_PTT_DOWN = b"PTTD1" + STREAM_TOKEN.encode()   # 下键: 按住说话 按下
-CTRL_PTT_UP   = b"PTTD0" + STREAM_TOKEN.encode()   # 下键: 按住说话 抬起
+CTRL_PTT_DOWN = b"PTTD1"   # 下键: 按住说话 按下
+CTRL_PTT_UP   = b"PTTD0"   # 下键: 按住说话 抬起
+CTRL_TGTM     = b"TGTM1"   # 目标切换广播 (所有端显示用)
+TARGETS = ("mac", "pc")
 CTRL_RETRY    = 3                    # 每事件连发 3 遍抗 UDP 丢包 (接收端 300ms 去重)
 CTRL_GAP_MS   = 30
 MUTE_GRACE_MS = 1500                 # 语音关/PTT 抬起后延迟静音, 留识别端收尾音频
@@ -45,6 +48,11 @@ class VoiceStream:
     """常开麦克风推流器. poll() 每次读一个 CHUNK 并发送, 由阻塞读自然节拍."""
 
     def __init__(self, i2c):
+        # 目标主机 (§六十八): /target.txt 持久化, 上键长按切换
+        try:
+            self.target = open("/target.txt").read().strip() or "mac"
+        except Exception:
+            self.target = "mac"
         self.i2c = i2c
         self.codec_ok = False
         self.mclk = None
@@ -260,7 +268,9 @@ class VoiceStream:
     # 语音输入控制 (工牌按键 → 控制帧 → 接收器合成微信输入法快捷键)
     # ------------------------------------------------------------------
     def _send_ctrl(self, frame):
-        """控制帧连发 3 遍抗丢包; 阻塞 ~90ms, I2S 8KB 缓冲(256ms)可吸收."""
+        """控制帧连发 3 遍抗丢包; 阻塞 ~90ms, I2S 8KB 缓冲(256ms)可吸收.
+        帧 = 前缀 + token + "@目标tag" (§六十八, relay 按目标路由)."""
+        frame = frame + STREAM_TOKEN.encode() + b"@" + self.target.encode()
         for i in range(CTRL_RETRY):
             try:
                 self.sock.sendto(frame, (STREAM_IP, STREAM_PORT))
@@ -285,6 +295,17 @@ class VoiceStream:
             self._unmute()
         else:
             self._mute_later()
+
+    def switch_target(self):
+        """上键长按: Mac → Windows → Mac 轮换, 持久化 + TGTM1 广播(所有端显示)."""
+        i = TARGETS.index(self.target) if self.target in TARGETS else 0
+        self.target = TARGETS[(i + 1) % len(TARGETS)]
+        try:
+            open("/target.txt", "w").write(self.target)
+        except Exception:
+            pass
+        self._send_ctrl(CTRL_TGTM)
+        return self.target
 
     def set_ptt(self, down):
         """下键: 按住说话. 按下=广播+解除静音; 抬起=广播+延迟静音."""

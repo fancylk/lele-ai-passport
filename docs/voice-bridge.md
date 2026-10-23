@@ -246,3 +246,32 @@ v7 起: 工牌收到 PNCH 只记"半通", **必须再收到终端的 PNCHA 回�
 5. `pkill -f mpremote` 会匹配到自身 ssh 命令行自杀; 杀残留进程用 lsof 定位 PID。
 6. `apps/answer.py` 的 C_BAR 类疏漏用 `py_compile` 查不出(定义存在即可),
    要靠设备端真跑——四个应用各真机 exec 一遍是最低验收线。
+
+## 目标主机选择(§六十八, 2026-10-23, 防多主机激活错乱)
+
+**问题**: Mac 与 Windows 接收器同时订阅中转, 工牌一说话两台机器的微信输入法
+一起激活。**方案**: "当前目标主机"状态放在中转(工牌不在线也能切), 三层防错乱:
+
+```
+1. relay current_target (权威状态, 内存):
+   TSET+token+@tag 设定 / TSET0+token 恢复广播 / TGTQ+token 查询(回 TGT @tag|-)
+   控制帧(DICT*/PTTD*)只转发给目标 tag 的订阅端; 音频/PING/TGTM1 仍广播(无害)
+   重启丢失→回广播(安全默认); STATUS 尾部 target= 可查
+2. 控制帧内 @tag (固件 v9+): DICT1<token>@mac —— relay 路由为[],
+   接收端兜底过滤不匹配自己 tag 的帧 (Mac daemon + voice_receiver.py 都有)
+3. TGTM1+token+@tag: 工牌切换目标时广播, 所有端仅显示
+```
+
+**切换入口**:
+- **菜单栏小程序**(Mac): "语音目标: Mac/Windows" radio 组, 点选即 TSET, ~12s 轮询
+  TGTQ 刷新显示; UDP 直发 relay:9761(token 鉴权)
+- **工牌上键长按 1s**(固件 v9+, OTA 后生效): Mac→Windows→Mac 轮换, /target.txt
+  持久化, 屏显"目标: Mac/Windows", TGTM1 广播
+
+**部署状态**: relay ✓ 已上线(双订阅端路由仿真全绿: 目标 pc 时 mac 零收到,
+音频广播不变); Mac daemon+菜单栏 ✓; voice_receiver.py ✓(Windows 端下次同步生效);
+工牌固件已发 OTA v9(工牌在线后菜单→OTA 检查更新, 或回家串口刷)。
+
+**注意**: tag 约定 mac=Mac / pc=Windows(voice_receiver --tag, daemon config
+relay.tag); 目标设为 pc 时 Mac 完全静默(收不到任何语音帧), 反之亦然——
+这就是"防激活错乱"本身; 音频仍会广播到两端(识别不依赖激活, 无害)。

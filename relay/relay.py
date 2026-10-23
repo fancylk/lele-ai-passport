@@ -15,7 +15,11 @@
      订阅者 30s 需重发保活 (90s 无心跳自动剔除), 超时回收独立运行, 不依赖音源发包.
   4. 探测与状态监控:
      UDP :9762 支持 PING/PONG 测延迟, 亦支持 STATUS 查询活跃终端详情.
-  5. UDP 打洞汇聚 (2026-10-11 §六十五, 向后兼容):
+  5. 目标主机路由 (2026-10-23 §六十八): current_target 状态 (内存, 重启回广播);
+     TSET+token+@tag 设定 / TSET0+token 清除 / TGTQ+token 查询 (回 TGT @tag|-(广播)).
+     控制帧 (DICT*/PTTD*) 仅转发给当前目标 tag 的订阅端, 防多主机激活错乱;
+     音频/PING/TGTM1 广播不变.
+  6. UDP 打洞汇聚 (2026-10-11 §六十五, 向后兼容):
      终端发 SRCQ+token 查音源公网映射地址; 音源(工牌)的 PONG 响应尾部
      捎带 |PEER=ip:port (最新订阅端映射地址). 两端互发 PNCH 凿开 NAT 后
      音频端到端直传, 本机只剩保活/回退通道.
@@ -50,6 +54,7 @@ def main():
 
     source = None            # (addr, last_seen)
     subs = {}                # addr -> {"last_seen": timestamp, "tag": str}
+    current_target = None    # §六十八: 控制帧只发给该 tag; None=广播所有订阅端
     fwd = src_pkts = 0
     last_stats = time.time()
     last_cleanup = time.time()
@@ -71,6 +76,31 @@ def main():
                 source = (addr, now)
                 try:
                     a.sendto(b"LELE1_OK", addr)
+                except OSError:
+                    pass
+
+            # 目标主机设定 (§六十八): TSET+token+@tag / TSET0+token / TGTQ+token
+            elif data.startswith(b"TSET0") and data[5:5 + len(TOKEN)] == TOKEN:
+                current_target = None
+                log("current target -> BROADCAST")
+                try:
+                    a.sendto(b"TSET_OK", addr)
+                except OSError:
+                    pass
+            elif data.startswith(b"TSET") and data[4:4 + len(TOKEN)] == TOKEN and data[4 + len(TOKEN):4 + len(TOKEN) + 1] == b"@":
+                want = data[5 + len(TOKEN):].decode("utf-8", "ignore").strip()
+                if want:
+                    current_target = want
+                    online = sum(1 for info in subs.values() if info["tag"] == want)
+                    log(f"current target -> {want!r} ({online} 端在线)")
+                    try:
+                        a.sendto(b"TSET_OK", addr)
+                    except OSError:
+                        pass
+            elif data.startswith(b"TGTQ") and data[4:4 + len(TOKEN)] == TOKEN:
+                reply = b"TGT @" + current_target.encode() if current_target else b"TGT -"
+                try:
+                    a.sendto(reply, addr)
                 except OSError:
                     pass
 
@@ -112,8 +142,14 @@ def main():
                 src_pkts += 1
                 source = (addr, now)
 
+                # §六十八: 控制帧 (DICT*/PTTD*) 按 current_target 路由;
+                # 音频/PING/TGTM1(目标切换广播)不受影响.
+                dst_addrs = None
+                if current_target and len(data) >= 5 and data[:4] in (b"DICT", b"PTTD"):
+                    dst_addrs = [s for s, info in subs.items() if info["tag"] == current_target]
+
                 # 双路 / 多路全量复制转发给所有当前存活订阅端
-                for s in list(subs.keys()):
+                for s in (dst_addrs if dst_addrs is not None else list(subs.keys())):
                     try:
                         a.sendto(data, s)
                         fwd += 1
@@ -150,7 +186,8 @@ def main():
                     src_str = f"{source[0][0]}:{source[0][1]}" if source else "offline"
                     sub_list = [f"{v['tag']}@{k[0]}:{k[1]}" for k, v in subs.items()]
                     status_resp = (f"source={src_str};subs={len(subs)};"
-                                   f"list={','.join(sub_list)};src_pkts={src_pkts};fwd={fwd}").encode()
+                                   f"list={','.join(sub_list)};src_pkts={src_pkts};fwd={fwd};"
+                                   f"target={current_target or '-'}").encode()
                     p.sendto(status_resp, addr2)
         except (BlockingIOError, socket.timeout):
             pass

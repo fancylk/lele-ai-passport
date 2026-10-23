@@ -1,6 +1,6 @@
 """远程麦克风应用 (乐乐语音桥, §六十四/§六十五) —— 由多应用启动器调起 (§六十六).
 
-按键: 上=语音开关(长输入会话) 下=按住说话 OK=翻页, 长按OK=重启进应用菜单
+按键: 上=语音开关(点按) 长按上=切目标主机(Mac/Windows) 下=按住说话 OK=翻页, 长按OK=菜单
 语音关 = 广播控制帧 + 1.5s 收尾宽限后静音省电; 开机即待机, 握手照发保中转注册.
 屏幕实时显示到主机端的延迟(RTT)/码率/丢包/信号.
 
@@ -69,7 +69,8 @@ class BridgeUI:
             self.line(Y_STATUS, self._status_text(connected, stream_ok, voice),
                       self._status_color(connected, stream_ok, voice))
             self.line(Y_RTT, "延迟 RTT: ---", C_GREY)
-            self.line(Y_HOST, "主机 %s:%d" % (STREAM_IP, STREAM_PORT), C_GREY)
+            tgt = getattr(voice, "target", "mac")
+            self.line(Y_HOST, "目标: %s" % ("Windows" if tgt == "pc" else "Mac"), C_CYAN)
             self.line(Y_RATE, "码率: %dkbps" % (SAMPLE_RATE * 16 // 1024), C_WHITE)
             self.line(Y_SENT, "已发: 0B", C_WHITE)
             self.line(Y_RSSI, "WiFi 信号: %s" % (rssi or "---"), C_WHITE)
@@ -191,6 +192,8 @@ def run(display=None):
     last_btn_time = 0
     ok_down_ms = None        # OK 按下时刻: 点按=翻页, 长按>1s=回菜单
     ok_long_fired = False
+    up_down_ms = None        # UP 按下时刻: 短按=语音开关, 长按>1s=切目标 (§六十八)
+    up_long_fired = False
     tick = 0
     last_ui = time.ticks_ms()
 
@@ -208,10 +211,9 @@ def run(display=None):
                 voice.set_ptt(True)
                 ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice),
                         ui._status_color(connected, stream_ok, voice))
-            elif btn == "UP" and stream_ok and last_btn != "DOWN":
-                voice.set_dict_mode(not voice.dict_on)
-                ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice),
-                        ui._status_color(connected, stream_ok, voice))
+            elif btn == "UP" and last_btn != "DOWN":
+                up_down_ms = now          # 计时: 松开短按=语音开关, 长按=切目标
+                up_long_fired = False
             elif btn == "OK" and last_btn != "DOWN":
                 ok_down_ms = now
                 ok_long_fired = False
@@ -221,6 +223,22 @@ def run(display=None):
                     ui.full_render(connected, stream_ok, voice, None)
                 ok_down_ms = None
             last_btn = btn
+        # UP 长按 ≥1s → 切换目标主机 (§六十八)
+        if btn == "UP" and up_down_ms is not None and not up_long_fired \
+                and time.ticks_diff(now, up_down_ms) > 1000:
+            up_long_fired = True
+            t = voice.switch_target()
+            ui.line(Y_HOST, "目标: %s" % ("Windows" if t == "pc" else "Mac"), C_CYAN)
+            ui.line(Y_STATUS, "目标已切到 " + ("Windows" if t == "pc" else "Mac"), C_YELLOW)
+
+        # UP 松开(未被长按消费) → 语音开关
+        if btn is None and last_btn == "UP" and up_down_ms is not None and not up_long_fired and stream_ok:
+            voice.set_dict_mode(not voice.dict_on)
+            ui.line(Y_STATUS, ui._status_text(connected, stream_ok, voice),
+                    ui._status_color(connected, stream_ok, voice))
+        if btn is None and last_btn == "UP":
+            up_down_ms = None
+
         # OK 长按 ≥1s → 重启进应用菜单 (§六十六)
         if btn == "OK" and ok_down_ms is not None and not ok_long_fired \
                 and time.ticks_diff(now, ok_down_ms) > OK_MENU_MS:

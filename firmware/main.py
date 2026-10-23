@@ -27,6 +27,7 @@ C_WHITE  = 0xFFFF
 C_GREY   = 0xC618
 C_YELLOW = 0xFFE0
 C_GREEN  = 0x07E0
+C_RED    = 0xF800
 
 
 def make_display():
@@ -90,14 +91,19 @@ def main():
     except Exception:
         pass
 
-    for d in ("/apps", "/ota", "/backup"):
+    for d in ("/apps", "/otastage", "/backup"):
         try:
             os.mkdir(d)
         except OSError:
             pass
+    try:
+        if "ota" in os.listdir("/"):
+            os.rmdir("/ota")
+    except Exception:
+        pass
 
     menu_requested = splash(display, adc)
-    if not menu_requested and MENU_FLAG in os.listdir("/"):
+    if not menu_requested and "menu.flag" in os.listdir("/"):
         menu_requested = True
         try:
             os.remove(MENU_FLAG)
