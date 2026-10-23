@@ -83,6 +83,36 @@ def splash(display, adc, secs=3):
     return False
 
 
+def auto_ota(display):
+    """开机自动检查更新 (§六十八): 仅当有新版才下载应用; 失败静默继续启动."""
+    from wifi_manager import WiFiManager
+    draw_string_cn(display, "检查更新…", 8, 220, C_GREY, C_BG)
+    wifi = WiFiManager()
+    try:
+        if not wifi.connect(timeout=8):
+            return
+    except Exception:
+        return
+    import ota
+    try:
+        r = ota.check()
+    except Exception as e:
+        print("[OTA] 自动检查失败:", e)
+        return
+    if r is None:
+        return
+    newv, files = r
+    draw_string_cn(display, "发现新版本 v%d, 升级中" % newv, 8, 220, C_YELLOW, C_BG)
+    print("[OTA] 自动升级 v%d (%d 文件)…" % (newv, len(files)))
+    try:
+        ota.download_and_apply(newv, files, log=lambda s2: draw_string_cn(display, s2[:15], 8, 244, C_GREY, C_BG))
+        reset()   # 升级成功, 重启进入新固件
+    except Exception as e:
+        print("[!] 自动 OTA 失败(已可回滚):", e)
+        draw_string_cn(display, "升级失败, 继续启动", 8, 244, C_RED, C_BG)
+        time.sleep_ms(1500)
+
+
 def main():
     display = make_display()
     adc = ADC(Pin(0))
@@ -114,6 +144,10 @@ def main():
         import apps.menu
         apps.menu.run(display, adc)   # 菜单选择后自行写 /app.txt 并 reset
         reset()                        # 菜单返回(取消/异常) → 按当前应用重启
+
+    # 开机自动 OTA (§六十八): WiFi 幂等, 检查 ~2s; 有新版自动升级重启, 无新版直接进应用.
+    # v7 升到本版仍需菜单手动一次; 本版起永久自动.
+    auto_ota(display)
 
     app = current_app()
     gc.collect()
