@@ -196,6 +196,9 @@ def main():
     except Exception:
         pass
 
+    # §六十八补3: 开机先停在选择页, 用户按 OK 确认连接哪台主机 (不设超时)
+    select_target(display, adc)
+
     menu_requested = splash(display, adc)
     if not menu_requested and "menu.flag" in os.listdir("/"):
         menu_requested = True
