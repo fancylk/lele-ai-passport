@@ -1,93 +1,67 @@
-# 🪪 乐乐的 AI 导游工牌 (Lele AI Tour Guide Passport)
+# lele-voice/ —— 乐乐语音桥（工牌语音输入系统）
 
-> **为小学生亲子自驾旅行打造的智能 AI 导游与 AGY 任务控制终端**  
-> 硬件平台：FoloToy / TRAE AI Passport (ESP32-C3 + 2.4" 240x320 ST7789 LCD + ES8311 音频 + 3 按键分压梯)
+> 本文件夹是 [github.com/fancylk/lele-ai-passport](https://github.com/fancylk/lele-ai-passport)
+> 的代码快照（2026-10-12 状态，cm311 仓库内快照），收录进 cm311 仓库便于
+> 跨机器/跨会话直接开工。**开发请在 lele 主仓库进行，改完再同步回来**
+> （或把本文件夹当唯一现场，见下方"双现场说明"）。
 
----
+## 它是什么
 
-## 🌟 项目愿景与核心功能
+工牌（FoloToy/TRAE AI Passport，ESP32-C3+ES8311+MicroPython）被清零重设计为
+**常开麦克风语音输入音源**：对它说话 → 腾讯云中转 → 任意一台电脑的虚拟声卡
+→ 微信输入法语音输入 → 出中文字。工牌屏幕实时显示到中转的 RTT/码率/丢包。
 
-本项目并非简单的任务监视器，而是提供给小孩子（乐乐）去**自主探索、收集旅行好玩内容、自己当导游讲解**的随身交互入口，同时作为控制 AGY 的物理入口：
+**当前状态：Mac 端端到端已验证可用（用户直接用工牌 dictate 与 AI 对话）；Mac 端已由 Rust
+常驻守护（`macos-daemon/`，launchd 自启）+ 菜单栏小程序（`macos-menubar/`）接管，详见下方"功能进度"。**
+Windows 端配置见 [docs/windows-guide.md](docs/windows-guide.md)。
 
-1. **三步交互式确认流（Voice ➔ Preview ➔ Commit）**：
-   - **第 1 步（语音表达）**：按住工牌【上键】，乐乐直接对麦克风说话说明想法；
-   - **第 2 步（文字方案预览）**：松开【上键】，屏幕清晰显示识别的**乐乐原话**与大模型生成的**建议讲解提纲与考题**；
-   - **第 3 步（孩子确认 ➔ 部署生效）**：乐乐按【OK 键】确认，触发 GitHub 自动构建与 Webhook 部署，2 秒后公网网页（[https://trip.taoge.xyz/](https://trip.taoge.xyz/)）自动刷新！
-2. **全量离线古诗词与人文知识库**：
-   - 内置 16 大经典人文景点（白马寺、龙门石窟、夫子庙、中华门、大雁塔、大唐不夜城、兵马俑、华山、函谷关、地坑院、清明上河园等）；
-   - 对标小学 1~5 年级与初中语文必背古诗词、历史名人故事及“💡 乐乐考考爸妈”趣味问答；
-   - 按【下键】在本地 **0 毫秒零延迟即时切页浏览**。
-3. **小米 MIMO 大模型多模态赋能**：
-   - 接入 Xiaomi MiMo-v2.5 多模态体系，支持 `mimo-v2.5-tts`（音色“冰糖”）儿童生动解说语音合成与 ASR 语音识别。
-4. **全套中文字库引擎（GB2312 6,978 字）**：
-   - 自研 16x16 高性能中文字模引擎（`chinese_font.py` + `font16.bin`），采用直写 SPI 窗口块传输，彻底解决方块乱码与闪烁。
-5. **Wi-Fi 无线 OTA 空中部署**：
-   - 内置 WebREPL 监听，支持随时拔掉 USB 线，通过局域网 Wi-Fi 一键空中热更新代码与字库。
+## 目录
 
----
+| 目录 | 内容 |
+|---|---|
+| `firmware/` | 工牌 MicroPython 固件（main.py 启动器+多应用+屏显 RTT，voice_stream.py=ES8311+I2S+UDP+DICT/PTTD 控制帧，ota.py=HTTP OTA，font16.bin 含 Unifont ASCII 的 v4 字库） |
+| `tools/` | 电脑端接收器（voice_receiver.py 双模式+语音控制帧触发/`start_receiver.bat` Windows 一键启动/verify_blackhole.sh 电平验证/serial_grab.py REPL 抢救/spike_weetype_hotkey.py 快捷键自检） |
+| `relay/` | 腾讯云 UDP 中转（部署在 `ssh tencent:/opt/lele-relay/`，systemd 单元 `lele-relay`；SRCQ/PNCH/PONG 汇聚动词支持打洞） |
+| `scripts/` | OTA 与部署（ota_publish.sh 发布 OTA manifest、deploy_wireless_ota_mac.sh 无线推固件、deploy_serial_nas.sh NAS USB 串口部署） |
+| `voice-daemon/` | Mac 常驻守护（Rust，launchd 自启）：中转/LAN 收流→重采样→BlackHole、DICT/PTT 控制帧→切输入法+合成快捷键、UDP 打洞直传、doctor/install 子命令（§六十五） |
+| `menubar/` | Mac 菜单栏小程序（Swift AppKit 单文件，零三方依赖）：状态图标 🎙/🔗/☁️/⚠️、状态总览、实时日志、配置指引与自愈、通知开关、重启守护（§六十七、§六十八） |
+| `docs/` | **voice-bridge.md=全案架构与实装记录；windows-guide.md=Windows 配置与开发指南（含空对话开场白）** |
 
-## 🛠️ 硬件引脚定义 (ESP32-C3)
+## 📦 跨平台发布包 (v1.0.0)
 
-| 功能模块 | 引脚 / 通道 | 说明 |
-| :--- | :--- | :--- |
-| **LCD SCLK** | `GPIO 6` | SPI 硬件时钟（30MHz） |
-| **LCD MOSI** | `GPIO 5` | SPI 数据输出 |
-| **LCD DC** | `GPIO 2` | 数据 / 命令切换 |
-| **LCD CS** | `GPIO 7` | 片选 |
-| **LCD BL** | `GPIO 10` | 背光控制（高电平点亮） |
-| **按键分压梯** | `GPIO 0` (ADC1_CH0) | 【上键】<300mV \| 【下键】300~800mV \| 【OK键】800~2200mV |
-| **音频 Codec** | `ES8311` (I2C 0x18) | SDA: `GPIO 10`, SCL: `GPIO 7` |
-| **电量计** | `CW2017` (I2C 0x63) | 实时百分比与电压监测 |
+GitHub Release: **[lele-voice-v1.0.0](https://github.com/fancylk/cm311/releases/tag/lele-voice-v1.0.0)**
 
----
+| 平台 / 固件 | 安装包文件 | 安装使用方式 |
+|---|---|---|
+| **macOS (Apple Silicon / Intel)** | [lele-voice-mac.dmg](https://github.com/fancylk/cm311/releases/download/lele-voice-v1.0.0/lele-voice-mac.dmg) | 挂载镜像，双击【一键安装.command】，自动安装 Daemon 与 Menubar 并引导权限 |
+| **Windows 10 / 11 (x64)** | [lele-voice-windows.zip](https://github.com/fancylk/cm311/releases/download/lele-voice-v1.0.0/lele-voice-windows.zip) | 解压后右键管理员运行 `install.bat`，自动配置依赖与开机静默后台运行 |
+| **工牌麦克风固件 (ESP32-C3)** | [lele-voice-mic-firmware.zip](https://github.com/fancylk/cm311/releases/download/lele-voice-v1.0.0/lele-voice-mic-firmware.zip) | 解压后运行 `flash_usb.bat` (Win) 或 `flash_usb.sh` (Mac) 一键 USB 烧入工牌 |
 
-## 📁 目录结构
+## 功能进度（依据 docs/交接文档.md §六十～§六十九）
 
-```
-lele-ai-passport/
-├── firmware/                  # MicroPython 端侧固件与应用程序
-│   ├── boot.py                # 开机引导与 WebREPL OTA 自启
-│   ├── main.py                # 主事件循环与按键三步状态机
-│   ├── lele_ui.py             # 240x320 诗词导游与三步交互弹窗渲染器
-│   ├── chinese_font.py        # GB2312 高性能二分查找点阵字体引擎
-│   ├── font16.bin             # 272KB 全量 6978 汉字二进制点阵字库
-│   ├── spots_data.py          # 16 大经典景点与中小学必背诗词离线知识库
-│   ├── st7789_direct.py       # ST7789 硬件直驱驱动
-│   ├── wifi_manager.py        # Wi-Fi 连网与 UDP 双向通信管理器
-│   ├── audio_player.py        # ES8311 硬件音效与提示音播放器
-│   ├── battery.py             # CW2017 电量计读取模块
-│   └── config.py              # 全局引脚与屏幕分辨率配置
-├── bridge/                    # 宿主机（N1 / Linux）后台守护桥接服务
-│   ├── lele_bridge.py         # UDP 监听、Git 自动提交与 Webhook 部署分发
-│   ├── mimo_service.py        # 小米 MIMO 大模型 TTS 语音合成与方案策划
-│   └── mimo_client.py         # MIMO API 客户端封装
-├── scripts/                   # 一键部署与运维脚本
-│   ├── deploy_wireless_ota.sh # Wi-Fi 局域网空中无线部署脚本
-│   └── deploy_usb.sh          # USB 串口有线固件烧录脚本
-└── README.md                  # 本文档
-```
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| §六十～六十二 | 方案定稿+实装+收官：工牌常开麦克风 → 腾讯云 UDP 中转 → 虚拟声卡 → 微信输入法出字；代码入库 cm311，Windows 交接 | 已完成（Mac 端到端验证） |
+| §六十四 | 工牌按键 → 微信输入法语音控制：固件 DICT/PTTD 控制帧（连发 3 遍抗丢包），接收器零依赖注入（Mac=CGEvent） | 已完成（Windows 注入未实测） |
+| §六十五 | Mac 端散落脚本重写为单一 Rust 常驻守护 `voice-daemon/`（launchd 自启，实测全通） | 已完成 |
+| §六十五补记 | UDP 打洞端到端直传（SRCQ/PNCH/PONG 捎带 PEER，向后兼容，对称 NAT 自动留中转无损） | 已完成（跨 NAT 延迟量测待 OTA 后） |
+| §六十六 | 工牌多应用启动器（voice_bridge/guide/answer/catch，崩溃兜底不变砖）+ HTTP OTA（crc32+/otastage 暂存+/backup 回滚守卫，真机全流程）+ 打洞 PNCHA 双向确认 | 已完成（真机验证） |
+| §六十七 | 菜单栏小程序 `menubar/`（原生 AppKit）+ 守护系统通知（osascript 限频，[ui] notify 30s 热重载） | 已完成 |
+| §六十八 | 固件关键 Bug 修复（OTA v8：ota.pending 回滚守卫/长按 OK 回菜单/接球 C_RED）+ 菜单栏配置引导与自愈 + 授权弹窗治理 | 已完成 |
+| §六十九 | 重构推流保活状态机（按住保持、消化 1.5s 尾音、250ms/600ms 自动上屏、待机防误唤醒、单元测试通过）+ 交付跨平台安装包 | 已完成（v1.0.0 发布） |
+| §七十 | Windows 快捷键注入实测收官（2026-10-21）：微信输入法默认 按住说话=Ctrl+Win/长输入=Ctrl+Shift+Win 无需改绑；SendInput 扩展键标志+0.2s 和弦；状态机对齐 Mac（长输入点按翻转+3s 链路超时自愈）；pythonw 无黑窗口自启+receiver.log；**默认麦克风动态热切换**（IPolicyConfig COM，对齐 Mac b3c4a34，根治"调起但不出字"）；SUB_OK 信令帧误触发修复；**播放器重写**（callback 常开流+300ms 预缓冲+水位伺服，移植 audio.rs，抖动压测零裂缝） | 已完成（端到端验证：TTS 语音经伪造工牌会话识别上屏） |
 
----
+**未完成 / 已知问题：**
+1. 二期"识别文字回推盒子 InputPad → RDP Ctrl+V"未做（§六十/§六十二）。
+2. 接收器被强杀时默认麦克风可能停留在 CABLE Output（无还原钩子），重开接收器或手动改回（见 windows-guide.md §十）。
 
-## 🚀 快速使用
+## 运行参数速查
 
-### 1. USB 首次有线部署
-```bash
-./scripts/deploy_usb.sh /dev/ttyACM0
-```
+- 中转：`124.221.187.167`，UDP 9761（音频）/ 9762（探测），token `lele-6deb6d37`
+- 工牌：192.168.31.133（家庭网），WebREPL 密码 `folotoy`
+- 音频：16kHz/16bit/mono，1024B/包=32ms
+- Windows 启动：双击 `tools\start_receiver.bat`；Mac：`tools/voice_receiver.sh start`
 
-### 2. Wi-Fi 无线 OTA 空中热更新
-```bash
-./scripts/deploy_wireless_ota.sh 192.168.31.133
-```
+## 二期（待开发）
 
-### 3. 启动后台 N1 桥接守护服务
-```bash
-nohup python3 bridge/lele_bridge.py > bridge.log 2>&1 &
-```
-
----
-
-## 📜 许可与致谢
-- 专为乐乐亲子旅行项目定制开发
-- 感谢 FoloToy 与 TRAE 开源硬件生态
+识别文字回推：电脑侧抓微信输入法上屏文字 → UDP 回中转 → 盒子 InputPad（192.168.31.103，剪贴板桥）→ RDP Ctrl+V。设计要点见 windows-guide.md 第四节。

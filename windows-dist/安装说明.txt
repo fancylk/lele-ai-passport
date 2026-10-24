@@ -1,0 +1,34 @@
+乐乐语音桥 Windows 端 (§六十九) —— 安装说明
+================================================
+
+文件: lele-voice-daemon.exe (含守护 + 任务栏托盘, 单文件)
+
+安装 (双击一次即可):
+  1. 前置: VB-Cable 已装并重启过; 微信输入法已装并登录
+  2. 双击 lele-voice-daemon.exe → 自动完成:
+     - 复制到 %LOCALAPPDATA%\LeleVoice\
+     - 写入开机自启 (HKCU Run)
+     - 生成默认配置 config.toml
+     - 启动 (任务栏右下角出现托盘图标, 可能收在 ^ 折叠区)
+  3. 托盘菜单:
+     - 状态行: 收包/码率/RTT/直连或中转
+     - 语音目标: Mac / Windows (点选即切, 防两台机器同时激活)
+     - 打开日志 (记事本) / 编辑配置 (记事本)
+     - 系统通知开关 (气泡: 语音输入开/关、直连建立)
+     - 重启程序 / 退出
+
+必做一步 (微信输入法改绑):
+  Windows 无 Fn 虚拟键 —— 微信输入法设置里把「语音输入」快捷键改绑为 F9,
+  与默认配置 toggle_keys = "F9" 一致, 托盘程序才能合成语音快捷键。
+  (按住说话 ptt_keys 默认留空, 需要时在微信输入法改绑另一快捷键后填入)
+
+使用:
+  工牌开机 → 启动页选「Windows」→ 确认 → 对工牌说话 → 文字上屏 Windows
+  (或用 Mac 菜单栏把目标切到 Windows)
+
+卸载:
+  lele-voice-daemon.exe uninstall  (或直接删 %LOCALAPPDATA%\LeleVoice + 注册表 Run 项)
+
+排障:
+  lele-voice-daemon.exe doctor      # 设备/配置/中转连通性体检
+  日志: %LOCALAPPDATA%\LeleVoice\lele-voice-daemon.log
