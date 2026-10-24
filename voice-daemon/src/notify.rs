@@ -57,7 +57,10 @@ mod imp {
         // Box<String> 原始指针经 lParam 跨线程交给托盘窗口过程 (托盘侧 Box::from_raw 回收)
         let payload = Box::into_raw(Box::new(format!("{title}\u{1f}{body}")));
         unsafe {
-            PostMessageW(hwnd, WM_APP_NOTIFY as u32, 0, payload as isize);
+            if PostMessageW(hwnd, WM_APP_NOTIFY as u32, 0, payload as isize) == 0 {
+                // bugbot 修复: 投递失败(窗口销毁中)回收 payload, 防泄漏
+                drop(Box::from_raw(payload));
+            }
         }
     }
 

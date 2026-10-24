@@ -116,18 +116,23 @@ def select_target(display, adc):
         picked = None
         last_btn = None
         last_t = 0
+        MAX_ROWS = 7
         while picked is None:
             display.fill(C_BG)
             display.fill_rect(0, 0, 240, 36, C_BAR)
             draw_string_cn(display, "连接哪台主机?", 8, 10, C_WHITE, C_BAR)
+            # 滚动窗口: 保证选中项可见 (bugbot: 超一屏时选中项在屏外)
+            start = 0 if idx < MAX_ROWS else idx - MAX_ROWS + 1
             y = 60
-            for i, (tag, host, os_name) in enumerate(items):
-                if y > 270:
-                    break
+            for i in range(start, min(start + MAX_ROWS, len(items))):
+                tag, host, os_name = items[i]
                 cur = "▶" if i == idx else " "
                 color = C_GREEN if i == idx else C_WHITE
                 label = host[:12] + ("" if os_name == "" else " · " + ("Mac" if os_name == "macos" else os_name[:6]))
+                mark = ("↑" if start > 0 else " ") if i == start else (("↓" if start + MAX_ROWS < len(items) else " ") if i == start + MAX_ROWS - 1 else " ")
                 draw_string_cn(display, cur + " " + label, 8, y, color, C_BG)
+                if mark != " ":
+                    draw_string_cn(display, mark, 220, y, C_YELLOW, C_BG)
                 y += 30
             draw_string_cn(display, "上下选 · OK 确认", 8, 296, C_GREY, C_BAR)
             btn = read_btn(adc)
@@ -144,13 +149,16 @@ def select_target(display, adc):
         tag, host, _ = picked
         if tag is None:      # 刷新
             continue
-        # 4) 声明 + 持久化
+        # 4) 声明 + 持久化 (bugbot: 失败不假装已连, 回列表重选)
         draw_string_cn(display, "连接 %s..." % host[:12], 8, 130, C_YELLOW, C_BG)
-        tset_target(tag)
-        write_target(tag)
-        draw_string_cn(display, "已连接 %s   " % host[:10], 8, 130, C_GREEN, C_BG)
-        time.sleep_ms(800)
-        return tag
+        if tset_target(tag):
+            write_target(tag)
+            draw_string_cn(display, "已连接 %s   " % host[:10], 8, 130, C_GREEN, C_BG)
+            time.sleep_ms(800)
+            return tag
+        draw_string_cn(display, "连接失败, 重试 ", 8, 130, C_RED, C_BG)
+        time.sleep_ms(1200)
+        continue
 
 
 def _wait_retry(display, adc, title, hint):

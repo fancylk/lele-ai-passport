@@ -27,6 +27,7 @@ const WM_NULL: u32 = 0x0000;
 
 const NIM_ADD: u32 = 0;
 const NIM_MODIFY: u32 = 1;
+const NIM_DELETE: u32 = 2;
 const NIF_MESSAGE: u32 = 0x1;
 const NIF_ICON: u32 = 0x2;
 const NIF_TIP: u32 = 0x4;
@@ -453,19 +454,36 @@ unsafe fn show_menu(ctx: &TrayCtx) {
             let on = !ctx.state.notify_on.load(Ordering::Relaxed);
             ctx.state.notify_on.store(on, Ordering::Relaxed);
             crate::notify::set_enabled(on);
-            if let Ok(text) = std::fs::read_to_string(config::default_path().unwrap_or_default()) {
-                let out: Vec<String> = text
-                    .lines()
-                    .map(|l| {
-                        let t = l.trim();
-                        if t.starts_with("notify") {
-                            format!("notify = {}", on)
-                        } else {
-                            l.to_string()
+            let path = config::default_path().unwrap_or_default();
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let mut has_line = false;
+                let mut in_ui = false;
+                let mut out: Vec<String> = Vec::new();
+                for l in text.lines() {
+                    let t = l.trim();
+                    if t.starts_with('[') {
+                        // 段切换: [ui] 内无 notify 行则补写 (bugbot: 无行时只改内存不落盘)
+                        if in_ui && !has_line {
+                            out.push(format!("notify = {}", on));
+                            has_line = true;
                         }
-                    })
-                    .collect();
-                let _ = std::fs::write(config::default_path().unwrap_or_default(), out.join("\n"));
+                        in_ui = t.replace(' ', "") == "[ui]";
+                    }
+                    if in_ui && t.starts_with("notify") {
+                        has_line = true;
+                        out.push(format!("notify = {}", on));
+                        continue;
+                    }
+                    out.push(l.to_string());
+                }
+                if in_ui && !has_line {
+                    out.push(format!("notify = {}", on));
+                }
+                let mut body = out.join("\n");
+                if !body.ends_with('\n') {
+                    body.push('\n');
+                }
+                let _ = std::fs::write(&path, body);
             }
         }
         ID_RESTART => {
@@ -530,6 +548,16 @@ unsafe extern "system" fn tray_proc(hwnd: isize, msg: u32, wp: usize, lp: isize)
             0
         }
         WM_CLOSE | WM_DESTROY => {
+            unsafe {
+                // bugbot 修复: 删托盘图标, 防任务栏幽灵图标
+                let mut nid = NOTIFYICONDATAW {
+                    cbsize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                    hwnd,
+                    uid: 1,
+                    ..std::mem::zeroed()
+                };
+                Shell_NotifyIconW(NIM_DELETE, &nid);
+            }
             PostQuitMessage(0);
             0
         }

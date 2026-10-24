@@ -32,7 +32,7 @@ SUB_TIMEOUT = 90.0          # 在线判定: 90s 无心跳视为离线
 SOURCE_TIMEOUT = 60.0
 STATS_INTERVAL = 60.0
 RECORD_TTL_DAYS = 30        # 花名册记录保留 30 天 (§七十 用户定稿)
-KNOWN_HOSTS = "/var/lib/lele-relay/known_hosts.json"  # /opt 只读, 花名册放可写层
+KNOWN_HOSTS = os.environ.get("LELE_KNOWN_HOSTS", "/var/lib/lele-relay/known_hosts.json")  # /opt 只读, 放可写层(仿真用 env 覆盖)
 
 
 def log(msg):
@@ -89,6 +89,7 @@ def main():
     last_stats = time.time()
     last_cleanup = time.time()
     last_gc = time.time()
+    last_flush = time.time()
 
     def tag_addr(tag):
         """在线订阅中该 tag 的地址 (同 tag 多端时取最近心跳者)"""
@@ -137,12 +138,16 @@ def main():
             elif data.startswith(b"TSET") and data[4:4 + len(TOKEN)] == TOKEN and data[4 + len(TOKEN):4 + len(TOKEN) + 1] == b"@":
                 want = data[5 + len(TOKEN):].decode("utf-8", "ignore").strip()
                 if want:
-                    current_target = want
-                    online = tag_addr(want) is not None
-                    log(f"current target -> {want!r} ({'在线' if online else '离线!'})")
-                    persist()
+                    # bugbot 修复: 离线目标不生效 (防止"选择到声明间掉线"导致音频被丢)
+                    if tag_addr(want) is not None:
+                        if current_target != want:
+                            current_target = want
+                            persist()
+                            log(f"current target -> {want!r} (在线)")
+                    else:
+                        log(f"current target -> {want!r} 拒绝: 离线 (保持 {current_target!r})")
                     try:
-                        a.sendto(b"TSET_OK" if online else b"TSET_OFFLINE", addr)
+                        a.sendto(b"TSET_OK" if current_target == want else b"TSET_OFFLINE", addr)
                     except OSError:
                         pass
             elif data.startswith(b"TGTQ") and data[4:4 + len(TOKEN)] == TOKEN:
@@ -162,10 +167,16 @@ def main():
                 is_new = addr not in subs
                 subs[addr] = {"last_seen": now, "tag": tag}
                 rec = hosts.get(tag) or {}
-                if rec.get("host") != host or rec.get("os") != os_name or is_new:
+                meta_changed = (rec.get("host") != host or rec.get("os") != os_name
+                                or rec.get("ver") != ver or is_new or tag not in hosts)
+                if is_new:
                     log(f"host registered: [{tag}] {host} ({os_name} v{ver}) from {addr[0]}:{addr[1]}")
-                hosts[tag] = {"host": host, "os": os_name, "ver": ver, "last_seen": now}
-                persist()
+                if meta_changed:
+                    hosts[tag] = {"host": host, "os": os_name, "ver": ver, "last_seen": now}
+                    persist()
+                else:
+                    # 心跳: 只更内存时间, 由定期兜底落盘 (bugbot 写放大修复)
+                    hosts[tag]["last_seen"] = now
                 try:
                     a.sendto(b"REG_OK", addr)
                 except OSError:
@@ -245,7 +256,10 @@ def main():
                 tag = subs.pop(s, {}).get("tag", "unknown")
                 log(f"subscriber offline: [{tag}] (在线 {len(subs)})")
 
-        # 花名册 30 天 GC + 目标失联检查 (每小时)
+        # 花名册 last_seen 兜底落盘 (5min) + 30 天 GC + 目标失联检查 (每小时)
+        if now - last_flush >= 300.0:
+            last_flush = now
+            persist()
         if now - last_gc >= 3600.0:
             last_gc = now
             ttl = RECORD_TTL_DAYS * 86400
