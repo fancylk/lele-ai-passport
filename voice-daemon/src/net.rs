@@ -158,8 +158,9 @@ fn handle(
             if mine { " (本机)" } else { " (其他主机, 待机)" });
         return;
     }
-    if d.starts_with(b"LELE1") || d.starts_with(b"SUB_OK")
+    if d.starts_with(b"LELE1") || d.starts_with(b"SUB_OK") || d.starts_with(b"REG_OK")
         || d.starts_with(b"TSET") || d.starts_with(b"TGTQ") || d.starts_with(b"TGT ")
+        || d.starts_with(b"RST ")
     {
         return; // 工牌握手/订阅回执/目标声明与查询 (§六十八, relay 模式中转已消费), 不喂声卡
     }
@@ -209,12 +210,38 @@ fn punch_loop(
     }
 }
 
+fn hostname_str() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; 256];
+        unsafe {
+            if libc::gethostname(buf.as_mut_ptr() as *mut _, buf.len()) == 0 {
+                let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                return String::from_utf8_lossy(&buf[..end])
+                    .trim_end_matches(".local").to_string();
+            }
+        }
+        "mac".into()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "pc".into())
+    }
+}
+
 fn keepalive_loop(sock: Arc<UdpSocket>, host: &str, audio_port: u16, ping_port: u16, tag: &str, token: &str) {
     let audio_dst = (host.to_string(), audio_port);
     let ping_dst = (host.to_string(), ping_port);
     let mut sub_payload: Vec<u8> = b"SUB".to_vec();
     sub_payload.extend_from_slice(token.as_bytes());
     sub_payload.extend_from_slice(format!(":{tag}").as_bytes());
+    // §七十 花名册心跳: REG1+token+@tag|host|os|ver
+    let os_name = if cfg!(target_os = "macos") { "macos" } else { "windows" };
+    let mut reg_payload: Vec<u8> = b"REG1".to_vec();
+    reg_payload.extend_from_slice(token.as_bytes());
+    reg_payload.extend_from_slice(
+        format!("@{}|{}|{}|{}", tag, hostname_str(), os_name, env!("CARGO_PKG_VERSION")).as_bytes(),
+    );
 
     let mut sub_last = 0.0f64;
     let mut ping_last = 0.0f64;
@@ -225,6 +252,7 @@ fn keepalive_loop(sock: Arc<UdpSocket>, host: &str, audio_port: u16, ping_port: 
             if let Err(e) = sock.send_to(&sub_payload, audio_dst.clone()) {
                 crate::logi!("[!] SUB 发送失败(网络暂不可达, 忽略): {e}");
             }
+            let _ = sock.send_to(&reg_payload, audio_dst.clone()); // 花名册心跳
         }
         if now - ping_last >= 5.0 {
             ping_last = now;

@@ -50,8 +50,10 @@ struct HealthReport {
 var health = HealthReport()
 
 // ---- 目标主机 (§六十八): 经 relay TSET/TGTQ 查询与切换 ----
-var relayTarget: String? = nil      // nil=广播/未知; "mac"/"pc"
+var relayTarget: String? = nil      // 当前目标 tag (nil=未设)
 var targetTick = 0
+var roster: [(tag: String, host: String, os: String)] = []   // §七十 在线花名册
+var targetMenuItems: [NSMenuItem] = []
 
 func configValue(_ key: String) -> String? {
     guard let text = try? String(contentsOfFile: configPath, encoding: .utf8) else { return nil }
@@ -85,23 +87,30 @@ func relayRpc(_ payload: String, timeout: Double = 1.2) -> String? {
         }
     }
     guard sent == msg.utf8.count else { return nil }
-    var buf = [CChar](repeating: 0, count: 64)
+    var buf = [UInt8](repeating: 0, count: 2048)
     let n = recv(fd, &buf, buf.count, 0)
     guard n > 0 else { return nil }
-    return String(cString: buf)
+    return String(decoding: buf[0..<n], as: UTF8.self)
 }
 
-func queryTargetAsync() {
+func queryRosterAsync() {
     DispatchQueue.global().async {
-        let resp = relayRpc("TGTQ$TOKEN")
+        let resp = relayRpc("RQST$TOKEN", timeout: 2.0)
         var t: String? = nil
-        if let r = resp {
-            if r.hasPrefix("TGT @") { t = String(r.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines) }
-            else if r.hasPrefix("TGT -") { t = nil }
+        var list: [(String, String, String)] = []
+        if let r = resp, r.hasPrefix("RST "), let data = r.dropFirst(4).data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            t = obj["target"] as? String
+            if let hosts = obj["hosts"] as? [String: [String: Any]] {
+                list = hosts.map { (tag, info) in
+                    (tag, info["host"] as? String ?? tag, info["os"] as? String ?? "?")
+                }.sorted { $0.1 < $1.1 }
+            }
         }
         DispatchQueue.main.async {
             relayTarget = t
-            refreshMenu()
+            roster = list.map { (tag: $0.0, host: $0.1, os: $0.2) }
+            rebuildTargetMenu()
         }
     }
 }
@@ -117,14 +126,6 @@ func setTargetAsync(_ t: String) {
             }
             refreshMenu()
         }
-    }
-}
-
-func targetLabel(_ t: String?) -> String {
-    switch t {
-    case "mac": return "Mac"
-    case "pc": return "Windows"
-    default: return "全部广播"
     }
 }
 
@@ -369,8 +370,11 @@ final class Actions: NSObject {
         try? p.run()
     }
 
-    @objc func setTargetMac() { setTargetAsync("mac"); relayTarget = "mac"; refreshMenu() }
-    @objc func setTargetPc() { setTargetAsync("pc"); relayTarget = "pc"; refreshMenu() }
+    @objc func targetItemClicked(_ sender: NSMenuItem) {
+        guard let tag = sender.representedObject as? String else { return }
+        setTargetAsync(tag)
+    }
+    @objc func refreshRosterClicked() { queryRosterAsync() }
     @objc func quitApp() { NSApp.terminate(nil) }
 }
 let actions = Actions()
@@ -392,8 +396,9 @@ let eventLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 eventLine.isEnabled = false
 let targetLine = NSMenuItem(title: "语音目标: 查询中…", action: nil, keyEquivalent: "")
 targetLine.isEnabled = false
-let targetMacItem = NSMenuItem(title: "   Mac (本机)", action: #selector(Actions.setTargetMac), keyEquivalent: "")
-let targetPcItem = NSMenuItem(title: "   Windows", action: #selector(Actions.setTargetPc), keyEquivalent: "")
+let rosterHeaderLine = NSMenuItem(title: "在线主机 (点选切换):", action: nil, keyEquivalent: "")
+rosterHeaderLine.isEnabled = false
+let rosterRefreshItem = NSMenuItem(title: "↻ 刷新主机列表", action: #selector(Actions.refreshRosterClicked), keyEquivalent: "")
 let toggleLine = NSMenuItem(title: "系统通知", action: #selector(Actions.toggleNotify), keyEquivalent: "")
 
 let menu = NSMenu()
@@ -402,10 +407,10 @@ menu.addItem(warningLine)
 menu.addItem(statusLine)
 menu.addItem(eventLine)
 menu.addItem(targetLine)
-menu.addItem(targetMacItem)
-menu.addItem(targetPcItem)
-targetMacItem.target = actions
-targetPcItem.target = actions
+menu.addItem(rosterHeaderLine)
+rosterRefreshItem.target = actions
+menu.addItem(rosterRefreshItem)
+// 动态主机项插在刷新项之后 (rebuildTargetMenu 管理)
 menu.addItem(.separator())
 menu.addItem(withTitle: "🛠 打开配置并指导配置…", action: #selector(Actions.showConfigGuide), keyEquivalent: "").target = actions
 menu.addItem(withTitle: "打开实时日志 (Console)", action: #selector(Actions.openLog), keyEquivalent: "").target = actions
@@ -445,19 +450,51 @@ func refreshMenu() {
     eventLine.title = recentEvent.isEmpty ? "" : "最近: \(recentEvent)"
     eventLine.isEnabled = false
     toggleLine.title = "系统通知: \(notifyOn ? "开 ✓" : "关")"
-    targetLine.title = "语音目标: \(targetLabel(relayTarget))"
-    targetMacItem.state = relayTarget == "mac" ? .on : .off
-    targetPcItem.state = relayTarget == "pc" ? .on : .off
     targetTick += 1
 }
+func targetLabel(_ t: String?) -> String {
+    if let t = t, let hit = roster.first(where: { $0.tag == t }) {
+        return hit.host + " (" + (hit.os == "macos" ? "Mac" : hit.os) + ")"
+    }
+    return t ?? "未设置"
+}
+/// §七十: 动态重建主机菜单项 (roster 变化/刷新时调用)
+func rebuildTargetMenu() {
+    for item in targetMenuItems {
+        menu.removeItem(item)
+    }
+    targetMenuItems.removeAll()
+    if roster.isEmpty {
+        let m = NSMenuItem(title: "   (无在线主机)", action: nil, keyEquivalent: "")
+        m.isEnabled = false
+        menu.insertItem(m, at: rosterIndexBase())
+        targetMenuItems.append(m)
+    } else {
+        for host in roster {
+            let label = "   " + host.host + " · " + (host.os == "macos" ? "Mac" : host.os.capitalized)
+            let m = NSMenuItem(title: label, action: #selector(Actions.targetItemClicked), keyEquivalent: "")
+            m.target = actions
+            m.representedObject = host.tag
+            m.state = (host.tag == relayTarget) ? .on : .off
+            menu.insertItem(m, at: rosterIndexBase() + targetMenuItems.count)
+            targetMenuItems.append(m)
+        }
+    }
+    targetLine.title = "语音目标: " + targetLabel(relayTarget)
+}
+/// 动态项插入基点 = 刷新项的 index + 1
+func rosterIndexBase() -> Int {
+    let idx = menu.index(of: rosterRefreshItem)
+    return (idx >= 0 ? idx : menu.numberOfItems - 1) + 1
+}
 func targetPollTick() {
-    // 每 3 个 tick(~12s)后台查一次 relay 当前目标; 失败保留旧值
-    if targetTick % 3 == 0 { queryTargetAsync() }
+    // 每 3 个 tick(~12s)后台拉一次花名册+目标; 失败保留旧值
+    if targetTick % 3 == 0 { queryRosterAsync() }
 }
 
 // 首次启动
 poll()
 refreshMenu()
 Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { _ in refreshMenu(); targetPollTick() }
-queryTargetAsync()
+queryRosterAsync()
 app.run()

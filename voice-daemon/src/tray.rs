@@ -44,8 +44,7 @@ const MF_SEPARATOR: u32 = 0x800;
 
 const ID_STATUS: usize = 101;
 const ID_EVENT: usize = 102;
-const ID_TARGET_MAC: usize = 110;
-const ID_TARGET_PC: usize = 111;
+const ID_ROSTER_REFRESH: usize = 112;
 const ID_OPEN_LOG: usize = 120;
 const ID_EDIT_CFG: usize = 121;
 const ID_NOTIFY: usize = 122;
@@ -72,6 +71,9 @@ struct TrayCtx {
     hwnd: AtomicIsize,
     last_log_size: Mutex<u64>,
 }
+
+/// §七十 在线花名册 (query_roster_async 更新, build_menu 读取)
+static ROSTER: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new()); // (tag, host, os)
 
 // ---------- Win32 FFI ----------
 #[allow(non_snake_case)]
@@ -246,18 +248,25 @@ fn set_target_async(target: &'static str, state: Arc<TrayState>) {
         .ok();
 }
 
-fn query_target_async(state: Arc<TrayState>) {
+fn query_roster_async(state: Arc<TrayState>) {
     std::thread::Builder::new()
-        .name("tgtq".into())
+        .name("roster".into())
         .spawn(move || {
-            if let Some(resp) = relay_rpc("TGTQ$TOKEN", 1.5) {
-                let t = if resp.starts_with("TGT @") {
-                    Some(resp[5..].trim().to_string())
-                } else {
-                    None
-                };
-                *state.target.lock().unwrap() = t;
+            let Some(resp) = relay_rpc("RQST$TOKEN", 2.0) else { return };
+            let Some(json) = resp.strip_prefix("RST ") else { return };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return };
+            let mut list = Vec::new();
+            if let Some(hosts) = v.get("hosts").and_then(|h| h.as_object()) {
+                for (tag, info) in hosts {
+                    let host = info.get("host").and_then(|x| x.as_str()).unwrap_or(tag).to_string();
+                    let os = info.get("os").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+                    list.push((tag.clone(), host, os));
+                }
             }
+            list.sort_by(|a, b| a.1.cmp(&b.1));
+            let t = v.get("target").and_then(|x| x.as_str()).map(|x| x.to_string());
+            *ROSTER.lock().unwrap() = list;
+            *state.target.lock().unwrap() = t;
         })
         .ok();
 }
@@ -384,23 +393,24 @@ unsafe fn build_menu(ctx: &TrayCtx) -> HMENU {
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     let target = st.target.lock().unwrap().clone();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, to_wide(&format!("语音目标: {}", match target.as_deref() {
-        Some("pc") => "Windows",
-        Some("mac") => "Mac",
-        _ => "全部广播",
-    })).as_ptr());
-    AppendMenuW(
-        menu,
-        MF_STRING | if target.as_deref() == Some("mac") { MF_CHECKED } else { MF_STRING },
-        ID_TARGET_MAC,
-        to_wide("   Mac").as_ptr(),
-    );
-    AppendMenuW(
-        menu,
-        MF_STRING | if target.as_deref() == Some("pc") { MF_CHECKED } else { MF_STRING },
-        ID_TARGET_PC,
-        to_wide("   Windows").as_ptr(),
-    );
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, to_wide(&format!("语音目标: {}", target.clone().unwrap_or_else(|| "未设置".into()))).as_ptr());
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, to_wide("在线主机 (点选切换):").as_ptr());
+    let roster = ROSTER.lock().unwrap().clone();
+    if roster.is_empty() {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, to_wide("   (无在线主机)").as_ptr());
+    } else {
+        for (i, (tag, host, os)) in roster.iter().enumerate() {
+            let _ = tag;
+            let os_disp = if os == "macos" { "Mac" } else { os };
+            AppendMenuW(
+                menu,
+                MF_STRING | if target.as_deref() == Some(tag.as_str()) { MF_CHECKED } else { MF_STRING },
+                500 + i,
+                to_wide(&format!("   {host} · {os_disp}")).as_ptr(),
+            );
+        }
+    }
+    AppendMenuW(menu, MF_STRING, ID_ROSTER_REFRESH, to_wide("↻ 刷新主机列表").as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     AppendMenuW(menu, MF_STRING, ID_OPEN_LOG, to_wide("打开日志 (记事本)").as_ptr());
     AppendMenuW(menu, MF_STRING, ID_EDIT_CFG, to_wide("编辑配置 (记事本)").as_ptr());
@@ -426,8 +436,7 @@ unsafe fn show_menu(ctx: &TrayCtx) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
     match cmd as usize {
-        ID_TARGET_MAC => set_target_async("mac", ctx.state.clone()),
-        ID_TARGET_PC => set_target_async("pc", ctx.state.clone()),
+
         ID_OPEN_LOG => {
             let _ = std::process::Command::new("notepad.exe").arg(crate::install::log_path()).spawn();
         }
@@ -516,7 +525,7 @@ unsafe extern "system" fn tray_proc(hwnd: isize, msg: u32, wp: usize, lp: isize)
             static TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let n = TICK.fetch_add(1, Ordering::Relaxed);
             if n % 3 == 0 {
-                query_target_async(ctx.state.clone());
+                query_roster_async(ctx.state.clone());
             }
             0
         }

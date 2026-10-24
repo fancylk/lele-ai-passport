@@ -16,7 +16,7 @@ import gc
 import os
 import time
 from machine import Pin, SPI, ADC, reset
-from config import APP_DEFAULT
+from config import APP_DEFAULT, STREAM_IP, STREAM_PORT, STREAM_TOKEN
 from st7789_direct import ST7789Direct
 from chinese_font import draw_string_cn
 import keyinput
@@ -77,48 +77,92 @@ def write_target(t):
 
 
 def select_target(display, adc):
-    """§六十八 启动选主机: 停住等待用户选择 (不设超时) ——
-    UP/DOWN 切 Mac/Windows, OK 确认才继续; 高亮上次连接 (/target.txt)."""
-    targets = [("mac", "Mac"), ("pc", "Windows")]
-    idx = 0
-    for i, (t, _) in enumerate(targets):
-        if t == read_target():
-            idx = i
-            break
-    prev = targets[idx][1]
-
-    def render():
+    """§七十 启动选主机 (花名册版): 停住等待用户选择, 只允许在线设备.
+    页面状态: 连 WiFi → 拉花名册 → 列表选择(UP/DOWN/OK) → TSET 声明 + 持久化.
+    失败/空列表: 显示原因, 按 OK 重试 (永不进应用, 直到选定在线主机)."""
+    from wifi_manager import WiFiManager
+    wifi = WiFiManager()
+    while True:
+        # 1) WiFi
         display.fill(C_BG)
         display.fill_rect(0, 0, 240, 36, C_BAR)
         draw_string_cn(display, "连接哪台主机?", 8, 10, C_WHITE, C_BAR)
-        for i, (_, label) in enumerate(targets):
-            cur = "▶" if i == idx else "  "
-            color = C_GREEN if i == idx else C_WHITE
-            draw_string_cn(display, cur + " " + label, 40, 90 + i * 34, color, C_BG)
-        draw_string_cn(display, "上下选 · OK 确认连接", 8, 200, C_GREY, C_BG)
-        draw_string_cn(display, "上次: " + prev, 8, 230, C_YELLOW, C_BG)
-        draw_string_cn(display, "ADC:%d" % keyinput.last_mv, 150, 230, C_GREY, C_BG)
-
-    render()
-    last_btn = None
-    last_t = 0
-    while True:
-        btn = read_btn(adc)
-        if btn != last_btn and time.ticks_diff(time.ticks_ms(), last_t) > 120:
-            last_t = time.ticks_ms()
-            if btn == "UP":
-                idx = (idx - 1) % len(targets)
-                render()
-            elif btn == "DOWN":
-                idx = (idx + 1) % len(targets)
-                render()
-            elif btn == "OK":
+        draw_string_cn(display, "正在连接 WiFi...", 8, 120, C_GREY, C_BG)
+        ok = False
+        try:
+            ok = wifi.connect(timeout=8)
+        except Exception:
+            pass
+        if not ok:
+            _wait_retry(display, adc, "WiFi 未连接", "检查路由器后重试")
+            continue
+        # 2) 花名册
+        draw_string_cn(display, "查询在线主机...", 8, 120, C_GREY, C_BG)
+        r = rqst_roster()
+        if r is None:
+            _wait_retry(display, adc, "查询主机列表失败", "服务器无响应, 重试")
+            continue
+        cur_target, roster = r
+        if not roster:
+            _wait_retry(display, adc, "暂无在线主机", "主机开机后按 OK 重试")
+            continue
+        # 3) 列表选择
+        idx = 0
+        for i, (tag, _, _) in enumerate(roster):
+            if tag == (cur_target or read_target()):
+                idx = i
                 break
-            last_btn = btn
-        time.sleep_ms(20)
-    t = targets[idx][0]
-    write_target(t)
-    return t
+        items = roster + [(None, "↻ 刷新列表", "")]
+        picked = None
+        last_btn = None
+        last_t = 0
+        while picked is None:
+            display.fill(C_BG)
+            display.fill_rect(0, 0, 240, 36, C_BAR)
+            draw_string_cn(display, "连接哪台主机?", 8, 10, C_WHITE, C_BAR)
+            y = 60
+            for i, (tag, host, os_name) in enumerate(items):
+                if y > 270:
+                    break
+                cur = "▶" if i == idx else " "
+                color = C_GREEN if i == idx else C_WHITE
+                label = host[:12] + ("" if os_name == "" else " · " + ("Mac" if os_name == "macos" else os_name[:6]))
+                draw_string_cn(display, cur + " " + label, 8, y, color, C_BG)
+                y += 30
+            draw_string_cn(display, "上下选 · OK 确认", 8, 296, C_GREY, C_BAR)
+            btn = read_btn(adc)
+            if btn != last_btn and time.ticks_diff(time.ticks_ms(), last_t) > 120:
+                last_t = time.ticks_ms()
+                if btn == "UP":
+                    idx = (idx - 1) % len(items)
+                elif btn == "DOWN":
+                    idx = (idx + 1) % len(items)
+                elif btn == "OK":
+                    picked = items[idx]
+                last_btn = btn
+            time.sleep_ms(20)
+        tag, host, _ = picked
+        if tag is None:      # 刷新
+            continue
+        # 4) 声明 + 持久化
+        draw_string_cn(display, "连接 %s..." % host[:12], 8, 130, C_YELLOW, C_BG)
+        tset_target(tag)
+        write_target(tag)
+        draw_string_cn(display, "已连接 %s   " % host[:10], 8, 130, C_GREEN, C_BG)
+        time.sleep_ms(800)
+        return tag
+
+
+def _wait_retry(display, adc, title, hint):
+    display.fill(C_BG)
+    display.fill_rect(0, 0, 240, 36, C_BAR)
+    draw_string_cn(display, title, 8, 10, C_WHITE, C_BAR)
+    draw_string_cn(display, hint, 8, 120, C_GREY, C_BG)
+    draw_string_cn(display, "按 OK 重试", 8, 160, C_YELLOW, C_BG)
+    while read_btn(adc) != "OK":
+        time.sleep_ms(30)
+    while read_btn(adc) is not None:   # 等松开
+        time.sleep_ms(30)
 
 
 def splash(display, adc, secs=2):

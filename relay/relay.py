@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """
-乐乐语音桥 · 腾讯云中转 (UDP 星型多路复制枢纽)
+乐乐语音桥 · 腾讯云中转 (UDP 枢纽, §七十 设备花名册版)
 
-场景: 工牌与多台终端 (Mac、PC) 不在同一局域网, 音频经本机中转.
+核心语义 (2026-10-24 §七十, 用户定稿):
+  1. 单目标转发: 音频/控制帧/打洞包一律只发给 current_target 一台,
+     不再广播 (无目标 = 丢弃, 直到工牌/菜单设定目标).
+  2. 设备花名册: 接收端以 REG1+token+@tag|host|os|ver 登记 (20s 心跳=订阅),
+     中转维护 tag → {host, os, ver, last_seen}, 在线=90s 内有心跳.
+  3. 持久化: /opt/lele-relay/known_hosts.json (roster + current_target),
+     变更即落盘, 重启不丢; 记录保留 30 天, 超期清除.
+  4. 工牌花名册查询: RQST+token → RST+JSON (仅在线设备 + 当前目标).
+  5. 打洞 (§六十五): SRCQ/PONG|PEER 的 PEER 现在取"当前 target"的映射地址.
 
-架构特性:
-  1. 多路并发复制转发 (Fan-out):
-     无论同时连接多少台终端 (如 PC 和 Mac 同时订阅), 服务端对每个音频包
-     均无条件完整复制并多路分发给所有活跃订阅端.
-     客户端自行决定是否播放/写入虚拟声卡 (BlackHole / VB-Cable) 或解析识别.
-  2. 灵活终端标识:
-     订阅包支持 b"SUB" + TOKEN, 也支持扩展格式 b"SUB" + TOKEN + b":" + TAG (如 "mac", "pc").
-  3. 独立保活与超时回收:
-     订阅者 30s 需重发保活 (90s 无心跳自动剔除), 超时回收独立运行, 不依赖音源发包.
-  4. 探测与状态监控:
-     UDP :9762 支持 PING/PONG 测延迟, 亦支持 STATUS 查询活跃终端详情.
-  5. 目标主机路由 (2026-10-23 §六十八): current_target 状态 (内存, 重启回广播);
-     TSET+token+@tag 设定 / TSET0+token 清除 / TGTQ+token 查询 (回 TGT @tag|-(广播)).
-     控制帧 (DICT*/PTTD*) 仅转发给当前目标 tag 的订阅端, 防多主机激活错乱;
-     音频/PING/TGTM1 广播不变.
-  6. UDP 打洞汇聚 (2026-10-11 §六十五, 向后兼容):
-     终端发 SRCQ+token 查音源公网映射地址; 音源(工牌)的 PONG 响应尾部
-     捎带 |PEER=ip:port (最新订阅端映射地址). 两端互发 PNCH 凿开 NAT 后
-     音频端到端直传, 本机只剩保活/回退通道.
+历史兼容:
+  - SUB+token[:tag] 老订阅仍被接受 (元数据缺省, 不影响转发);
+  - TSET/TSET0/TGTQ/STATUS/PING-PONG 语义不变 (STATUS 尾部加 roster).
+
+线程模型: 单线程 select-free (音频口 0.5s 超时轮询 + 探测口非阻塞).
 """
 
+import json
+import os
 import socket
 import sys
 import time
@@ -32,13 +28,41 @@ import time
 TOKEN = b"lele-6deb6d37"
 PORT_AUDIO = 9761
 PORT_PING = 9762
-SUB_TIMEOUT = 90.0
+SUB_TIMEOUT = 90.0          # 在线判定: 90s 无心跳视为离线
 SOURCE_TIMEOUT = 60.0
 STATS_INTERVAL = 60.0
+RECORD_TTL_DAYS = 30        # 花名册记录保留 30 天 (§七十 用户定稿)
+KNOWN_HOSTS = "/var/lib/lele-relay/known_hosts.json"  # /opt 只读, 花名册放可写层
 
 
 def log(msg):
     print(time.strftime("[%Y-%m-%d %H:%M:%S]"), msg, flush=True)
+
+
+def load_known_hosts():
+    """持久化: {"target": tag|null, "hosts": {tag: {host,os,ver,last_seen}}}"""
+    try:
+        os.makedirs(os.path.dirname(KNOWN_HOSTS), exist_ok=True)
+    except Exception:
+        pass
+    try:
+        with open(KNOWN_HOSTS) as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("hosts"), dict):
+            return d
+    except Exception:
+        pass
+    return {"target": None, "hosts": {}}
+
+
+def save_known_hosts(state):
+    tmp = KNOWN_HOSTS + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f, ensure_ascii=False)
+        os.replace(tmp, KNOWN_HOSTS)
+    except Exception as e:
+        log(f"[!] known_hosts.json 写入失败: {e}")
 
 
 def main():
@@ -53,13 +77,35 @@ def main():
     p.setblocking(False)
 
     source = None            # (addr, last_seen)
-    subs = {}                # addr -> {"last_seen": timestamp, "tag": str}
-    current_target = None    # §六十八: 控制帧只发给该 tag; None=广播所有订阅端
+    subs = {}                # addr -> {"last_seen": t, "tag": str}  (在线订阅, 含老 SUB)
+    store = load_known_hosts()
+    current_target = store.get("target") or None
+    hosts = store.get("hosts", {})   # tag -> {host, os, ver, last_seen}
+    log(f"relay up: audio:{PORT_AUDIO} ping:{PORT_PING} token=***{TOKEN[-4:].decode()}"
+        f" | roster={len(hosts)} target={current_target or '-'} (§七十 单目标转发)")
+
     fwd = src_pkts = 0
+    dropped_no_target = 0
     last_stats = time.time()
     last_cleanup = time.time()
+    last_gc = time.time()
 
-    log(f"relay up: audio:{PORT_AUDIO} ping:{PORT_PING} token=***{TOKEN[-4:].decode()}")
+    def tag_addr(tag):
+        """在线订阅中该 tag 的地址 (同 tag 多端时取最近心跳者)"""
+        cands = [(info["last_seen"], s) for s, info in subs.items() if info["tag"] == tag]
+        return max(cands)[1] if cands else None
+
+    def target_addrs():
+        """§七十: 当前目标的地址列表 (0 或 1 台); 无目标 = [] (丢弃, 不广播)"""
+        if not current_target:
+            return []
+        s = tag_addr(current_target)
+        return [s] if s else []
+
+    def persist():
+        store["target"] = current_target
+        store["hosts"] = hosts
+        save_known_hosts(store)
 
     while True:
         try:
@@ -79,10 +125,11 @@ def main():
                 except OSError:
                     pass
 
-            # 目标主机设定 (§六十八): TSET+token+@tag / TSET0+token / TGTQ+token
+            # 目标主机设定 (§六十八/§七十): TSET+token+@tag / TSET0 / TGTQ
             elif data.startswith(b"TSET0") and data[5:5 + len(TOKEN)] == TOKEN:
                 current_target = None
-                log("current target -> BROADCAST")
+                log("current target -> (none, 单目标模式: 无目标不转发)")
+                persist()
                 try:
                     a.sendto(b"TSET_OK", addr)
                 except OSError:
@@ -91,10 +138,11 @@ def main():
                 want = data[5 + len(TOKEN):].decode("utf-8", "ignore").strip()
                 if want:
                     current_target = want
-                    online = sum(1 for info in subs.values() if info["tag"] == want)
-                    log(f"current target -> {want!r} ({online} 端在线)")
+                    online = tag_addr(want) is not None
+                    log(f"current target -> {want!r} ({'在线' if online else '离线!'})")
+                    persist()
                     try:
-                        a.sendto(b"TSET_OK", addr)
+                        a.sendto(b"TSET_OK" if online else b"TSET_OFFLINE", addr)
                     except OSError:
                         pass
             elif data.startswith(b"TGTQ") and data[4:4 + len(TOKEN)] == TOKEN:
@@ -104,7 +152,26 @@ def main():
                 except OSError:
                     pass
 
-            # 终端订阅注册: SUB + token 或 SUB + token + :tag
+            # 花名册登记 (§七十): REG1+token+@tag|host|os|ver —— 订阅+元数据+心跳
+            elif data.startswith(b"REG1") and data[4:4 + len(TOKEN)] == TOKEN and data[4 + len(TOKEN):4 + len(TOKEN) + 1] == b"@":
+                parts = data[5 + len(TOKEN):].decode("utf-8", "ignore").split("|")
+                tag = (parts[0] if parts else "").strip() or "client"
+                host = (parts[1] if len(parts) > 1 else "").strip() or tag
+                os_name = (parts[2] if len(parts) > 2 else "").strip() or "?"
+                ver = (parts[3] if len(parts) > 3 else "").strip() or "?"
+                is_new = addr not in subs
+                subs[addr] = {"last_seen": now, "tag": tag}
+                rec = hosts.get(tag) or {}
+                if rec.get("host") != host or rec.get("os") != os_name or is_new:
+                    log(f"host registered: [{tag}] {host} ({os_name} v{ver}) from {addr[0]}:{addr[1]}")
+                hosts[tag] = {"host": host, "os": os_name, "ver": ver, "last_seen": now}
+                persist()
+                try:
+                    a.sendto(b"REG_OK", addr)
+                except OSError:
+                    pass
+
+            # 老订阅 (兼容): SUB+token[:tag] —— 无元数据, 花名册里补占位
             elif data.startswith(b"SUB") and data[3:3 + len(TOKEN)] == TOKEN:
                 tag = "client"
                 extra = data[3 + len(TOKEN):]
@@ -113,20 +180,34 @@ def main():
                         tag = extra[1:].decode("utf-8", "ignore").strip() or "client"
                     except Exception:
                         pass
-                
                 is_new = addr not in subs
                 subs[addr] = {"last_seen": now, "tag": tag}
                 if is_new:
-                    active_tags = [f"{v['tag']}@{k[0]}:{k[1]}" for k, v in subs.items()]
-                    log(f"subscriber added: {addr[0]}:{addr[1]} [{tag}] (total {len(subs)}: {', '.join(active_tags)})")
-                
-                # 回送轻量确认包, 维持双向 NAT 映射
+                    log(f"subscriber (legacy SUB): {addr[0]}:{addr[1]} [{tag}]")
+                if tag not in hosts:
+                    hosts[tag] = {"host": tag, "os": "?", "ver": "?", "last_seen": now}
+                    persist()
                 try:
                     a.sendto(b"SUB_OK", addr)
                 except OSError:
                     pass
 
-            # 打洞汇聚: 音源地址查询 (终端向音源发 PNCH 用, token 鉴权)
+            # 花名册查询 (§七十): RQST+token → RST+JSON (仅在线 + 当前目标)
+            elif data.startswith(b"RQST") and data[4:4 + len(TOKEN)] == TOKEN:
+                online = {}
+                for s, info in subs.items():
+                    t = info["tag"]
+                    rec = hosts.get(t, {})
+                    online[t] = {"host": rec.get("host", t), "os": rec.get("os", "?"),
+                                 "ver": rec.get("ver", "?")}
+                payload = json.dumps({"target": current_target, "hosts": online},
+                                     ensure_ascii=False, separators=(",", ":"))
+                try:
+                    a.sendto(b"RST " + payload.encode(), addr)
+                except OSError:
+                    pass
+
+            # 打洞汇聚: 音源地址查询
             elif data.startswith(b"SRCQ") and data[4:4 + len(TOKEN)] == TOKEN:
                 if source:
                     reply = b"SRC " + f"{source[0][0]}:{source[0][1]}".encode()
@@ -137,69 +218,81 @@ def main():
                 except OSError:
                     pass
 
-            # 音频数据包: 仅转发来自音源的包
+            # 音源数据包 (音频/控制帧/打洞): §七十 单目标转发, 不广播
             elif source and addr == source[0]:
                 src_pkts += 1
                 source = (addr, now)
-
-                # §六十八: 控制帧 (DICT*/PTTD*) 按 current_target 路由;
-                # 音频/PING/TGTM1(目标切换广播)不受影响.
-                dst_addrs = None
-                if current_target and len(data) >= 5 and data[:4] in (b"DICT", b"PTTD"):
-                    dst_addrs = [s for s, info in subs.items() if info["tag"] == current_target]
-
-                # 双路 / 多路全量复制转发给所有当前存活订阅端
-                for s in (dst_addrs if dst_addrs is not None else list(subs.keys())):
+                dsts = target_addrs()
+                if not dsts:
+                    dropped_no_target += 1
+                    if dropped_no_target <= 3 or dropped_no_target % 100 == 0:
+                        log(f"[§七十] 无目标, 丢弃音源包 (#{dropped_no_target}) — 待工牌/菜单 TSET")
+                for s in dsts:
                     try:
                         a.sendto(data, s)
                         fwd += 1
                     except OSError:
                         pass
 
-        # 定时清理超时的音源与订阅端 (独立于数据流)
+        # 定时清理: 音源/订阅超时
         if now - last_cleanup >= 5.0:
             last_cleanup = now
-            # 音源超时
             if source and now - source[1] > SOURCE_TIMEOUT:
                 log(f"source timeout: {source[0][0]}:{source[0][1]}")
                 source = None
-
-            # 订阅端超时
             dead = [s for s, info in subs.items() if now - info["last_seen"] > SUB_TIMEOUT]
             for s in dead:
                 tag = subs.pop(s, {}).get("tag", "unknown")
-                log(f"subscriber timeout: {s[0]}:{s[1]} [{tag}] (total {len(subs)})")
+                log(f"subscriber offline: [{tag}] (在线 {len(subs)})")
+
+        # 花名册 30 天 GC + 目标失联检查 (每小时)
+        if now - last_gc >= 3600.0:
+            last_gc = now
+            ttl = RECORD_TTL_DAYS * 86400
+            expired = [t for t, r in hosts.items() if now - r.get("last_seen", 0) > ttl]
+            for t in expired:
+                log(f"roster GC: {t} 超 30 天未连, 移除")
+                hosts.pop(t, None)
+            if expired:
+                persist()
+            if current_target and current_target not in hosts:
+                log(f"current target {current_target} 已过期清除")
+                current_target = None
+                persist()
 
         # 探测与状态口 (UDP 9762)
         try:
             while True:
-                d, addr2 = p.recvfrom(128)
+                d, addr2 = p.recvfrom(256)
                 if len(d) >= 4 and d[:4] == b"PING":
                     pong = b"PONG" + d[4:12]
-                    # 打洞汇聚: 把最新订阅端映射地址捎给音源 (旧固件自动忽略尾巴)
-                    if source and subs:
-                        newest = max(subs.items(), key=lambda kv: kv[1]["last_seen"])
-                        pong += b"|PEER=%s:%d" % (str(newest[0][0]).encode(), newest[0][1])
+                    # 打洞: PEER = 当前目标的映射地址 (§七十, 原"最新订阅端"改为目标)
+                    if source and current_target:
+                        s = tag_addr(current_target)
+                        if s:
+                            pong += b"|PEER=%s:%d" % (str(s[0]).encode(), s[1])
                     p.sendto(pong, addr2)
                 elif d.startswith(b"STATUS"):
-                    # 状态查询: 返回音源与订阅端列表
                     src_str = f"{source[0][0]}:{source[0][1]}" if source else "offline"
                     sub_list = [f"{v['tag']}@{k[0]}:{k[1]}" for k, v in subs.items()]
+                    roster = [f"{r['host']}({r['os']})" for t, r in hosts.items()]
                     status_resp = (f"source={src_str};subs={len(subs)};"
                                    f"list={','.join(sub_list)};src_pkts={src_pkts};fwd={fwd};"
-                                   f"target={current_target or '-'}").encode()
+                                   f"target={current_target or '-'};dropped={dropped_no_target};"
+                                   f"roster={','.join(roster) or '-'}").encode()
                     p.sendto(status_resp, addr2)
         except (BlockingIOError, socket.timeout):
             pass
         except Exception:
             pass
 
-        # 定期输出统计信息
+        # 定期统计
         if now - last_stats >= STATS_INTERVAL:
             last_stats = now
             sub_summary = [f"{v['tag']}@{k[0]}:{k[1]}" for k, v in subs.items()]
-            log(f"stats: source={'yes' if source else 'no'} subs={len(subs)} {sub_summary} "
-                f"src_pkts={src_pkts} forwarded={fwd}")
+            log(f"stats: source={'yes' if source else 'no'} target={current_target or '-'} "
+                f"subs={len(subs)} {sub_summary} src_pkts={src_pkts} forwarded={fwd} "
+                f"dropped={dropped_no_target}")
 
 
 if __name__ == "__main__":
