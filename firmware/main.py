@@ -2,8 +2,8 @@
 
 启动流程:
   boot.py (WebREPL + OTA 回滚守卫) → 本文件:
-    1. 连接主机选择页 (§六十八): UP/DOWN 切 Mac/Windows, OK 确认;
-       5s 无操作沿用上次选择 (/target.txt 持久化)
+    1. 连接主机选择页 (§六十八): **停住等待用户选择** —— UP/DOWN 切 Mac/Windows,
+       OK 确认才继续 (/target.txt 持久化, 高亮上次连接); 不设超时
     2. 应用菜单窗口 2s: 任意键 → 菜单; 否则自动 OTA → 启动 /app.txt 应用
     3. 应用内约定: 长按 OK(>1s) 写 /menu.flag 并重启 → 回菜单
     4. 应用崩溃自动兜底: 显示错误 3s 后回菜单
@@ -84,17 +84,18 @@ def write_target(t):
         pass
 
 
-def select_target(display, adc, secs=5):
-    """§六十八 启动选主机: UP/DOWN 切 Mac/Windows, OK 确认; 超时沿用上次选择.
-    返回所选 tag. 确认/超时都写回 /target.txt."""
+def select_target(display, adc):
+    """§六十八 启动选主机: 停住等待用户选择 (不设超时) ——
+    UP/DOWN 切 Mac/Windows, OK 确认才继续; 高亮上次连接 (/target.txt)."""
     targets = [("mac", "Mac"), ("pc", "Windows")]
     idx = 0
     for i, (t, _) in enumerate(targets):
         if t == read_target():
             idx = i
             break
+    prev = targets[idx][1]
 
-    def render(count):
+    def render():
         display.fill(C_BG)
         display.fill_rect(0, 0, 240, 36, C_BAR)
         draw_string_cn(display, "连接哪台主机?", 8, 10, C_WHITE, C_BAR)
@@ -102,33 +103,25 @@ def select_target(display, adc, secs=5):
             cur = "▶" if i == idx else "  "
             color = C_GREEN if i == idx else C_WHITE
             draw_string_cn(display, cur + " " + label, 40, 90 + i * 34, color, C_BG)
-        draw_string_cn(display, "上下选 · OK 确认", 8, 200, C_GREY, C_BG)
-        draw_string_cn(display, "%d 秒后自动: %s" % (count, targets[idx][1]), 8, 230, C_YELLOW, C_BG)
+        draw_string_cn(display, "上下选 · OK 确认连接", 8, 200, C_GREY, C_BG)
+        draw_string_cn(display, "上次: " + prev, 8, 230, C_YELLOW, C_BG)
 
-    render(secs)
-    end = time.ticks_add(time.ticks_ms(), secs * 1000)
+    render()
     last_btn = None
     last_t = 0
-    while time.ticks_diff(end, time.ticks_ms()) > 0:
+    while True:
         btn = read_btn(adc)
         if btn != last_btn and time.ticks_diff(time.ticks_ms(), last_t) > 120:
             last_t = time.ticks_ms()
             if btn == "UP":
                 idx = (idx - 1) % len(targets)
-                render(time.ticks_diff(end, time.ticks_ms()) // 1000 + 1)
+                render()
             elif btn == "DOWN":
                 idx = (idx + 1) % len(targets)
-                render(time.ticks_diff(end, time.ticks_ms()) // 1000 + 1)
+                render()
             elif btn == "OK":
                 break
-            elif btn is None and last_btn in ("UP", "DOWN"):
-                end = time.ticks_add(time.ticks_ms(), 3000)  # 切换后续 3s
-                render(3)
             last_btn = btn
-        # 倒计时数字刷新
-        left = time.ticks_diff(end, time.ticks_ms()) // 1000 + 1
-        if left >= 0:
-            draw_string_cn(display, "%d 秒后自动: %s   " % (left, targets[idx][1]), 8, 230, C_YELLOW, C_BG)
         time.sleep_ms(20)
     t = targets[idx][0]
     write_target(t)
