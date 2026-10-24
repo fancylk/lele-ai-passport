@@ -18,6 +18,7 @@ from chinese_font import draw_string_cn
 from wifi_manager import WiFiManager
 from battery import BatteryGauge
 from voice_stream import VoiceStream
+from keyinput import read_btn
 
 # --- 颜色 ---
 C_BG      = 0x0841
@@ -116,18 +117,6 @@ class BridgeUI:
         ]
 
 
-def read_btn(adc):
-    try:
-        mv = (adc.read() * 3300) // 4095
-    except Exception:
-        return None
-    if mv < 300:
-        return "UP"
-    elif 300 <= mv < 800:
-        return "DOWN"
-    elif 800 <= mv < 2200:
-        return "OK"
-    return None
 
 
 def fmt_bytes(n):

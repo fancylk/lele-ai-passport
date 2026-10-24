@@ -19,6 +19,7 @@ from machine import Pin, SPI, ADC, reset
 from config import APP_DEFAULT
 from st7789_direct import ST7789Direct
 from chinese_font import draw_string_cn
+import keyinput
 
 MENU_FLAG = "/menu.flag"
 APP_PATH = "/app.txt"
@@ -40,18 +41,9 @@ def make_display():
         cs=Pin(1), dc=Pin(20), rst=None, bl=Pin(21), rotation=0)
 
 
+
 def read_btn(adc):
-    try:
-        mv = (adc.read() * 3300) // 4095
-    except Exception:
-        return None
-    if mv < 300:
-        return "UP"
-    elif 300 <= mv < 800:
-        return "DOWN"
-    elif 800 <= mv < 2200:
-        return "OK"
-    return None
+    return keyinput.read_btn(adc)
 
 
 def current_app():
@@ -105,6 +97,7 @@ def select_target(display, adc):
             draw_string_cn(display, cur + " " + label, 40, 90 + i * 34, color, C_BG)
         draw_string_cn(display, "上下选 · OK 确认连接", 8, 200, C_GREY, C_BG)
         draw_string_cn(display, "上次: " + prev, 8, 230, C_YELLOW, C_BG)
+        draw_string_cn(display, "ADC:%d" % keyinput.last_mv, 150, 230, C_GREY, C_BG)
 
     render()
     last_btn = None

@@ -6,6 +6,7 @@ import time
 
 from chinese_font import draw_string_cn
 import ota
+from keyinput import read_btn as _read_btn
 from apps.registry import APPS, APP_NAME
 
 APP_PATH = "/app.txt"
@@ -20,18 +21,6 @@ C_GREEN  = 0x07E0
 C_RED    = 0xF800
 
 
-def _read_btn(adc):
-    try:
-        mv = (adc.read() * 3300) // 4095
-    except Exception:
-        return None
-    if mv < 300:
-        return "UP"
-    elif 300 <= mv < 800:
-        return "DOWN"
-    elif 800 <= mv < 2200:
-        return "OK"
-    return None
 
 
 def _render(display, items, idx, note):

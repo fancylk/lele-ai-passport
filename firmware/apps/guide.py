@@ -18,6 +18,7 @@ from wifi_manager import WiFiManager
 from audio_player import AudioPlayer
 from battery import BatteryGauge
 from spots_data import SPOTS
+from keyinput import read_btn
 
 MENU_FLAG = "/menu.flag"
 OK_MENU_MS = 1000
@@ -59,19 +60,6 @@ curr_spot_idx = 0
 scen_idx = 0
 
 
-def _read_btn():
-    try:
-        raw = adc.read()
-        mv = (raw * 3300) // 4095
-    except Exception:
-        return None
-    if mv < 300:
-        return "UP"
-    elif 300 <= mv < 800:
-        return "DOWN"
-    elif 800 <= mv < 2200:
-        return "OK"
-    return None
 
 
 def _send_packet(d):
@@ -180,7 +168,7 @@ def run(display=None):
 
         # Key scan
         now = time.ticks_ms()
-        btn = _read_btn()
+        btn = read_btn(adc)
 
         if ui.state == STATE_GUIDE:
             # 1. Hold UP -> Ding-dong chime & speech screen

@@ -10,6 +10,7 @@ import time
 from machine import Pin, SPI, ADC
 from st7789_direct import ST7789Direct
 from chinese_font import draw_string_cn
+from keyinput import read_btn as _read_btn
 
 MENU_FLAG = "/menu.flag"
 OK_MENU_MS = 1000
@@ -28,18 +29,6 @@ PH = 8
 PADDLE_Y = H - 30
 
 
-def _read_btn(adc):
-    try:
-        mv = (adc.read() * 3300) // 4095
-    except Exception:
-        return None
-    if mv < 300:
-        return "UP"
-    elif 300 <= mv < 800:
-        return "DOWN"
-    elif 800 <= mv < 2200:
-        return "OK"
-    return None
 
 
 def _hud(display, score, lives):
