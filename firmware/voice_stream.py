@@ -296,32 +296,15 @@ class VoiceStream:
         else:
             self._mute_later()
 
-    def switch_target(self):
-        """上键长按: Mac → Windows → Mac 轮换, 持久化 + TGTM1 广播(所有端显示).
-        语音会话开着时无缝接力: 旧目标补 DICT0(结束), 新目标补 DICT1(接续识别)."""
-        old = self.target
-        i = TARGETS.index(old) if old in TARGETS else 0
-        self.target = TARGETS[(i + 1) % len(TARGETS)]
+    def announce_target(self):
+        """§六十八: 开机选定目标后向中转声明 (TSET+token+@tag), relay 依此路由.
+        中转重启会清目标, 应用启动时重发一次即恢复."""
         try:
-            open("/target.txt", "w").write(self.target)
-        except Exception:
-            pass
-        if self.dict_on:
-            self._send_ctrl_to(CTRL_DICT_OFF, old)
-            self._send_ctrl_to(CTRL_DICT_ON, self.target)
-        self._send_ctrl(CTRL_TGTM)
-        return self.target
-
-    def _send_ctrl_to(self, frame, target):
-        """指定目标发控制帧 (接力用, 不改 self.target)."""
-        frame = frame + STREAM_TOKEN.encode() + b"@" + target.encode()
-        for i in range(CTRL_RETRY):
-            try:
-                self.sock.sendto(frame, (STREAM_IP, STREAM_PORT))
-            except Exception:
-                pass
-            if i < CTRL_RETRY - 1:
-                time.sleep_ms(CTRL_GAP_MS)
+            self.sock.sendto(b"TSET" + STREAM_TOKEN.encode() + b"@" + self.target.encode(),
+                             (STREAM_IP, STREAM_PORT))
+            print("[+] 目标主机已声明:", self.target)
+        except Exception as e:
+            print("[!] TSET 失败:", e)
 
     def set_ptt(self, down):
         """下键: 按住说话. 按下=广播+解除静音; 抬起=广播+延迟静音."""

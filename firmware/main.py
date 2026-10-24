@@ -1,13 +1,15 @@
-"""乐乐工牌多应用启动器 (§六十六): 多应用 + OTA 升级.
+"""乐乐工牌多应用启动器 (§六十六): 多应用 + OTA 升级 + §六十八 启动选主机.
 
 启动流程:
   boot.py (WebREPL + OTA 回滚守卫) → 本文件:
-    1. 开机画面 3s: 期间任意键 → 应用菜单; 否则启动 /app.txt 里的应用 (默认远程麦克风)
-    2. 应用内约定: 长按 OK(>1s) 写 /menu.flag 并重启 → 回菜单
-    3. 应用崩溃自动兜底: 显示错误 3s 后回菜单
+    1. 连接主机选择页 (§六十八): UP/DOWN 切 Mac/Windows, OK 确认;
+       5s 无操作沿用上次选择 (/target.txt 持久化)
+    2. 应用菜单窗口 2s: 任意键 → 菜单; 否则自动 OTA → 启动 /app.txt 应用
+    3. 应用内约定: 长按 OK(>1s) 写 /menu.flag 并重启 → 回菜单
+    4. 应用崩溃自动兜底: 显示错误 3s 后回菜单
 
 应用注册表见 apps/menu.py; OTA 升级入口也在菜单里 (走腾讯 nginx HTTP,
-scripts/ota_publish.sh 发布). 详见 lele-voice/docs/voice-bridge.md §六十六.
+scripts/ota_publish.sh 发布). 详见 lele-voice/docs/voice-bridge.md §六十六/§六十八.
 """
 
 import gc
@@ -63,8 +65,78 @@ def current_app():
     return APP_DEFAULT
 
 
-def splash(display, adc, secs=3):
-    """开机画面 + 倒计时. 返回 True=期间有按键 (进菜单)."""
+def read_target():
+    try:
+        with open("/target.txt") as f:
+            t = f.read().strip()
+            if t in ("mac", "pc"):
+                return t
+    except Exception:
+        pass
+    return "mac"
+
+
+def write_target(t):
+    try:
+        with open("/target.txt", "w") as f:
+            f.write(t)
+    except Exception:
+        pass
+
+
+def select_target(display, adc, secs=5):
+    """§六十八 启动选主机: UP/DOWN 切 Mac/Windows, OK 确认; 超时沿用上次选择.
+    返回所选 tag. 确认/超时都写回 /target.txt."""
+    targets = [("mac", "Mac"), ("pc", "Windows")]
+    idx = 0
+    for i, (t, _) in enumerate(targets):
+        if t == read_target():
+            idx = i
+            break
+
+    def render(count):
+        display.fill(C_BG)
+        display.fill_rect(0, 0, 240, 36, C_BAR)
+        draw_string_cn(display, "连接哪台主机?", 8, 10, C_WHITE, C_BAR)
+        for i, (_, label) in enumerate(targets):
+            cur = "▶" if i == idx else "  "
+            color = C_GREEN if i == idx else C_WHITE
+            draw_string_cn(display, cur + " " + label, 40, 90 + i * 34, color, C_BG)
+        draw_string_cn(display, "上下选 · OK 确认", 8, 200, C_GREY, C_BG)
+        draw_string_cn(display, "%d 秒后自动: %s" % (count, targets[idx][1]), 8, 230, C_YELLOW, C_BG)
+
+    render(secs)
+    end = time.ticks_add(time.ticks_ms(), secs * 1000)
+    last_btn = None
+    last_t = 0
+    while time.ticks_diff(end, time.ticks_ms()) > 0:
+        btn = read_btn(adc)
+        if btn != last_btn and time.ticks_diff(time.ticks_ms(), last_t) > 120:
+            last_t = time.ticks_ms()
+            if btn == "UP":
+                idx = (idx - 1) % len(targets)
+                render(time.ticks_diff(end, time.ticks_ms()) // 1000 + 1)
+            elif btn == "DOWN":
+                idx = (idx + 1) % len(targets)
+                render(time.ticks_diff(end, time.ticks_ms()) // 1000 + 1)
+            elif btn == "OK":
+                break
+            elif btn is None and last_btn in ("UP", "DOWN"):
+                end = time.ticks_add(time.ticks_ms(), 3000)  # 切换后续 3s
+                render(3)
+            last_btn = btn
+        # 倒计时数字刷新
+        left = time.ticks_diff(end, time.ticks_ms()) // 1000 + 1
+        if left >= 0:
+            draw_string_cn(display, "%d 秒后自动: %s   " % (left, targets[idx][1]), 8, 230, C_YELLOW, C_BG)
+        time.sleep_ms(20)
+    t = targets[idx][0]
+    write_target(t)
+    return t
+
+
+def splash(display, adc, secs=2):
+    """应用菜单窗口. 返回 True=期间有按键 (进菜单)."""
     from apps.registry import APP_NAME
     display.fill(C_BG)
     display.fill_rect(0, 0, 240, 36, C_BAR)
@@ -72,7 +144,6 @@ def splash(display, adc, secs=3):
     app_label = APP_NAME.get(current_app(), current_app())
     draw_string_cn(display, "启动: " + app_label, 8, 60, C_WHITE, C_BG)
     draw_string_cn(display, "任意键 → 应用菜单", 8, 90, C_GREY, C_BG)
-    draw_string_cn(display, "多应用 + OTA §六十六", 8, 120, C_GREY, C_BG)
     for i in range(secs, 0, -1):
         draw_string_cn(display, "%d " % i, 8, 180, C_YELLOW, C_BG)
         end = time.ticks_add(time.ticks_ms(), 1000)
