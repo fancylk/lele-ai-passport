@@ -80,6 +80,7 @@ _setup_headless_logging()
 
 TOKEN = b"lele-6deb6d37"
 SUB_EVERY = 20.0
+SUB_VERSION = "1.0"
 PROBE_EVERY = 5.0
 
 # ---------------------------------------------------------------------------
@@ -951,8 +952,13 @@ def main():
                 if now - sub_last >= SUB_EVERY or sub_last == 0:
                     sub_last = now
                     sub_payload = b"SUB" + token + (f":{args.tag}".encode("utf-8") if args.tag else b"")
+                    reg_payload = (b"REG1" + token + b"@" + args.tag.encode("utf-8")
+                                   + b"|" + socket.gethostname().encode("utf-8")
+                                   + b"|" + sys.platform.encode("utf-8")
+                                   + b"|py-" + SUB_VERSION.encode("utf-8"))
                     try:
                         sock.sendto(sub_payload, (args.relay, args.port))
+                        sock.sendto(reg_payload, (args.relay, args.port))
                     except OSError as e:
                         print(f"[!] SUB 发送失败(网络暂不可达,忽略): {e}", flush=True)
                 if now - probe_last >= PROBE_EVERY or probe_last == 0:
@@ -996,7 +1002,9 @@ def main():
             if data is not None:
                 now2 = time.time()
                 head = data[:5]
-                if head == b"TGTM1" and data[5:5 + len(token)] == token:
+                if head in (b"TSET", b"TGTQ", b"TSET_", b"TGT ") or head.startswith(b"TSET") or head.startswith(b"TGT"):
+                    pass    # §六十八 目标声明/查询/回执, 不喂声卡
+                elif head == b"TGTM1" and data[5:5 + len(token)] == token:
                     t = data[5 + len(token):].decode("utf-8", "ignore").lstrip("@")
                     print(f"[目标] 工牌目标主机 → {t}{' (本机)' if t == args.tag else ''}", flush=True)
                 elif head in DICT_FRAMES and data[5:5 + len(token)] == token:

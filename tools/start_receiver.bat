@@ -27,8 +27,8 @@ if errorlevel 1 (
 )
 
 echo [*] 启动接收器: 订阅腾讯中转, 音频输出到 VB-Cable ^(CABLE Input^)
-echo     让微信输入法的语音输入麦克风选择 "CABLE Input (VB-Audio Virtual Cable)"
+echo     让微信输入法的语音输入麦克风选择 "CABLE Output (VB-Audio Virtual Cable)"
 echo     按 Ctrl-C 停止
 echo.
-python "%~dp0voice_receiver.py" --relay 124.221.187.167 --device "CABLE Input"
+python "%~dp0voice_receiver.py" --relay 124.221.187.167 --device "CABLE Input" --tag pc --voice-ptt-key ctrl,win --voice-toggle-key ctrl,shift,win
 pause

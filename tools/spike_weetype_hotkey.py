@@ -41,7 +41,7 @@ ax.AXIsProcessTrusted.restype = ctypes.c_bool
 
 kCGHIDEventTap = 0
 SRC = {"hid": 1, "session": 0, "private": 2}   # kCGEventSourceState*
-FLAG_FN = 0x00400000                            # kCGEventFlagMaskSecondaryFn
+FLAG_FN = 0x00800000                            # NX_SECONDARYFNMASK / kCGEventFlagMaskSecondaryFn
 K_FN = 63                                       # Fn/Globe = 微信输入法 PTT 键
 K_SPACE = 49                                    # 长输入 = Fn+空格
 

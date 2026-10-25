@@ -11,13 +11,15 @@ PORT="${VOICE_PORT:-9761}"
 RELAY="${VOICE_RELAY:-124.221.187.167}"
 RELAY_ARG=""
 [ -n "$RELAY" ] && RELAY_ARG="--relay $RELAY"
+TAG="${VOICE_TAG:-mac}"
+TAG_ARG="--tag $TAG"
 
 case "${1:-start}" in
   start)
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
       echo "[=] 已在运行 (pid $(cat "$PIDFILE"))"; exit 0
     fi
-    nohup "$PY" -u "$DIR/voice_receiver.py" --port "$PORT" $RELAY_ARG >>"$LOGFILE" 2>&1 &
+    nohup "$PY" -u "$DIR/voice_receiver.py" --port "$PORT" $RELAY_ARG $TAG_ARG >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 1
     if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
