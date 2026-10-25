@@ -140,7 +140,7 @@ fn install_menubar() {
     }
 }
 
-pub const EXAMPLE_TOML: &str = r#"# 乐乐语音桥 Mac 守护进程配置 (lele-voice-daemon)
+pub const EXAMPLE_TOML_MAC: &str = r#"# 乐乐语音桥 Mac 守护进程配置 (lele-voice-daemon)
 # 全部字段可省略, 省略即注释中的默认值.
 
 [relay]
@@ -174,6 +174,39 @@ probe_every = 5         # 中转音源查询间隔 (s)
 notify = true           # 收到事件(语音触发/直连建立)时发 macOS 系统通知
 "#;
 
+pub const EXAMPLE_TOML_WIN: &str = r#"# 乐乐语音桥 Windows 守护进程配置 (lele-voice-daemon)
+# 全部字段可省略, 省略即注释中的默认值. 注意: Mac 与 Windows 配置不可混用.
+
+[relay]
+host = "124.221.187.167"   # 腾讯中转; 留空 = LAN 直连
+port = 9761
+ping_port = 9762
+token = "lele-6deb6d37"
+tag = "pc"                 # 订阅标识 (花名册显示用)
+
+[audio]
+device = "CABLE Input"     # VB-Cable 播放端 (微信输入法选 CABLE Output)
+source_rate = 16000
+
+[trigger]
+enabled = true
+# Windows 无 Fn 虚拟键: 需在微信输入法设置改绑语音快捷键后, 在此填对应的键
+# 长输入建议 F9 (VK 0x78); 按住说话默认留空 (改绑后填, 如 "0x11,0x48"=Ctrl+H)
+ptt_keys = ""
+toggle_keys = "F9"
+mods = ""
+switch_ime = false         # Windows 端无需切 IME
+input_source_id = ""
+
+[punch]
+enabled = true
+interval_ms = 1000
+probe_every = 5
+
+[ui]
+notify = true              # 事件气泡通知 (托盘菜单可开关)
+"#;
+
 pub fn write_config_template(force: bool) -> PathBuf {
     let p = config_path();
     if p.exists() && !force {
@@ -182,7 +215,9 @@ pub fn write_config_template(force: bool) -> PathBuf {
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if std::fs::write(&p, EXAMPLE_TOML).is_ok() {
+    // §七十补: 模板按当前平台生成 (键值/注释两端不同, 防混用)
+    let body = if cfg!(target_os = "macos") { EXAMPLE_TOML_MAC } else { EXAMPLE_TOML_WIN };
+    if std::fs::write(&p, body).is_ok() {
         crate::logi!("[+] 配置模板已写入 {}", p.display());
     }
     p

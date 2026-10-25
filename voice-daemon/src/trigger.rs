@@ -57,6 +57,7 @@ pub enum TriggerMsg {
 pub struct Trigger {
     tx: Sender<TriggerMsg>,
     last_ctrl: Mutex<(Vec<u8>, Instant)>,
+    last_off: Arc<Mutex<Instant>>,      // 停止信号时刻: 抑制尾包误触发新推流 (§七十补)
     last_audio: Arc<Mutex<Instant>>,
     is_streaming: Arc<AtomicBool>,
     inj: Option<Injector>,
@@ -72,7 +73,7 @@ pub struct Trigger {
 }
 
 const DEDUP_WINDOW: Duration = Duration::from_millis(300); // 固件每事件连发 3 遍 (30ms 间隔)
-const STOP_TAIL_TIMEOUT: Duration = Duration::from_millis(250); // 收到停止控制帧后, 等待收尾音频结束的超时 (250ms 无音频即上屏)
+const TAIL_SUPPRESS: Duration = Duration::from_millis(2000); // 停止后 2s 内的工牌收尾尾包不触发新推流 (§七十补)
 const IDLE_TIMEOUT: Duration = Duration::from_millis(600); // 未收到停止控制帧但音频中断的保底超时 (600ms 无音频即上屏)
 const MAX_STREAM_DURATION: Duration = Duration::from_secs(120); // 单次推流最大安全时长 (120s 强制上屏, 防遗忘)
 const WATCHDOG_INTERVAL: Duration = Duration::from_millis(50); // 状态机看门狗心跳 (50ms)
@@ -94,11 +95,13 @@ impl Trigger {
         let (tx, rx) = channel::<TriggerMsg>();
         let is_streaming = Arc::new(AtomicBool::new(false));
         let last_audio = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600)));
+        let last_off = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600)));
         let mic_switcher = Arc::new(crate::mic::MicSwitcher::new(cfg.switch_mic));
         let t = Arc::new(Trigger {
             tx,
             last_ctrl: Mutex::new((Vec::new(), Instant::now() - Duration::from_secs(1))),
             last_audio: last_audio.clone(),
+            last_off: last_off.clone(),
             is_streaming: is_streaming.clone(),
             inj,
             mods,
@@ -116,7 +119,6 @@ impl Trigger {
             .name("trigger".into())
             .spawn(move || {
                 let mut key_held = false;
-                let mut stop_pending = false;
                 let mut stream_start_time = Instant::now();
 
                 loop {
@@ -124,7 +126,6 @@ impl Trigger {
                         Ok(TriggerMsg::Control(action)) => {
                             match action {
                                 Action::DictOn | Action::PttDown => {
-                                    stop_pending = false;
                                     *worker.last_audio.lock().unwrap() = Instant::now();
                                     if !key_held {
                                         worker.press_key();
@@ -145,15 +146,25 @@ impl Trigger {
                                 }
                                 Action::DictOff | Action::PttUp => {
                                     if key_held {
-                                        stop_pending = true;
-                                        crate::logi!("[🎙] {} → 收到停止信号, 等待音频收尾上屏...", action.label());
+                                        // §七十补: 立即释放 —— 微信输入法 Fn 松开即上屏,
+                                        // 尾包(工牌 1.5s 静音宽限)由 last_off 抑制窗丢弃
+                                        *worker.last_off.lock().unwrap() = Instant::now();
+                                        worker.release_key();
+                                        key_held = false;
+                                        worker.is_streaming.store(false, Ordering::Relaxed);
+                                        crate::logi!(
+                                            "[🎙] {} → 立即释放, 文字上屏",
+                                            action.label()
+                                        );
+                                        crate::notify::send("stream_end", "乐乐语音桥", "🎙 说话结束, 文字上屏");
                                     }
                                 }
                             }
                         }
                         Ok(TriggerMsg::AudioBurstStart) => {
-                            stop_pending = false;
-                            if !key_held {
+                            if *worker.last_off.lock().unwrap() + TAIL_SUPPRESS > Instant::now() {
+                                // 停止后的工牌收尾尾包: 抑制, 不重新开启
+                            } else if !key_held {
                                 worker.press_key();
                                 key_held = true;
                                 stream_start_time = Instant::now();
@@ -169,32 +180,24 @@ impl Trigger {
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
 
-                    // 看门狗: 检测推流是否停止或超时
+                    // 看门狗: 仅处理"无停止信号的音频中断"保底超时
                     if key_held {
                         let now = Instant::now();
                         let last_time = *worker.last_audio.lock().unwrap();
                         let elapsed = now.duration_since(last_time);
                         let duration = now.duration_since(stream_start_time);
 
-                        let timeout = if stop_pending {
-                            STOP_TAIL_TIMEOUT
-                        } else {
-                            IDLE_TIMEOUT
-                        };
-
                         let should_stop = if duration >= MAX_STREAM_DURATION {
                             crate::logi!("[🎙] 达到单次推流最大安全时长 (120s), 强制停止上屏");
                             true
-                        } else if elapsed >= timeout {
-                            true
                         } else {
-                            false
+                            elapsed >= IDLE_TIMEOUT
                         };
 
                         if should_stop {
+                            *worker.last_off.lock().unwrap() = Instant::now();
                             worker.release_key();
                             key_held = false;
-                            stop_pending = false;
                             worker.is_streaming.store(false, Ordering::Relaxed);
                             crate::logi!(
                                 "[🎙] 推流结束 ({}ms 无音频) → 停止上屏 (释放 {:?})",
@@ -342,28 +345,26 @@ mod tests {
         }
         assert!(t.is_streaming.load(Ordering::Relaxed), "持续推流中应保持开启状态");
 
-        // 3. 模拟收到停止信号: DICT0
+        // 3. 模拟收到停止信号: DICT0 → 立即释放 (§七十补: 微信 Fn 松开即上屏)
         t.submit(Action::DictOff, b"DICT0test");
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(t.is_streaming.load(Ordering::Relaxed), "收到停止信号但收尾音频未结束前应保持开启");
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!t.is_streaming.load(Ordering::Relaxed), "停止信号应立即释放");
 
-        // 4. 收尾音频持续 100ms
+        // 4. 停止后 2s 内的工牌收尾尾包应被抑制, 不重新开启
         for _ in 0..3 {
             t.on_audio();
             std::thread::sleep(Duration::from_millis(30));
         }
-        assert!(t.is_streaming.load(Ordering::Relaxed), "收尾音频流中应保持开启");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!t.is_streaming.load(Ordering::Relaxed), "收尾尾包不应触发新推流");
 
-        // 5. 音频彻底停止, 等待超时 (>250ms)
-        std::thread::sleep(Duration::from_millis(350));
-        assert!(!t.is_streaming.load(Ordering::Relaxed), "音频停止后应自动释放上屏并恢复待机");
-
-        // 6. 无控制帧直接推流 (保底首包自动开启)
+        // 5. 抑制窗过后, 新音频正常开启 (保底首包自动开启)
+        std::thread::sleep(Duration::from_millis(2100));
         t.on_audio();
         std::thread::sleep(Duration::from_millis(100));
-        assert!(t.is_streaming.load(Ordering::Relaxed), "首包音频到达应自动开启");
+        assert!(t.is_streaming.load(Ordering::Relaxed), "抑制窗后新音频应自动开启");
 
-        // 7. 无停止信号但音频中断 (>600ms)
+        // 6. 无停止信号但音频中断 (>600ms)
         std::thread::sleep(Duration::from_millis(700));
         assert!(!t.is_streaming.load(Ordering::Relaxed), "音频中断保底超时后应自动释放上屏");
     }
